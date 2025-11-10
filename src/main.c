@@ -30,8 +30,7 @@ LOG_MODULE_REGISTER(esb_ptx, CONFIG_ESB_PTX_APP_LOG_LEVEL);
 
 static bool ready = true;
 static struct esb_payload rx_payload;
-static struct esb_payload tx_payload = ESB_CREATE_PAYLOAD(0,
-	0x01, 0x00, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08);
+static struct esb_payload tx_payload = ESB_CREATE_PAYLOAD(0, 'A');
 
 #define _RADIO_SHORTS_COMMON                                                   \
 	(RADIO_SHORTS_READY_START_Msk | RADIO_SHORTS_END_DISABLE_Msk |         \
@@ -45,9 +44,11 @@ void event_handler(struct esb_evt const *event)
 	switch (event->evt_id) {
 	case ESB_EVENT_TX_SUCCESS:
 		LOG_DBG("TX SUCCESS EVENT");
+		dk_set_led_off(DK_LED1);
 		break;
 	case ESB_EVENT_TX_FAILED:
 		LOG_DBG("TX FAILED EVENT");
+		dk_set_led_off(DK_LED1);
 		break;
 	case ESB_EVENT_RX_RECEIVED:
 		while (esb_read_rx_payload(&rx_payload) == 0) {
@@ -192,15 +193,22 @@ int esb_initialize(void)
 	return 0;
 }
 
-static void leds_update(uint8_t value)
+static void button_handler(uint32_t button_state, uint32_t has_changed)
 {
-	uint32_t leds_mask =
-		(!(value % 8 > 0 && value % 8 <= 4) ? DK_LED1_MSK : 0) |
-		(!(value % 8 > 1 && value % 8 <= 5) ? DK_LED2_MSK : 0) |
-		(!(value % 8 > 2 && value % 8 <= 6) ? DK_LED3_MSK : 0) |
-		(!(value % 8 > 3) ? DK_LED4_MSK : 0);
+	if (has_changed & button_state & DK_BTN1_MSK) {
+		if (ready) {
+			ready = false;
+			esb_flush_tx();
 
-	dk_set_leds(leds_mask);
+			int err = esb_write_payload(&tx_payload);
+			if (err) {
+				LOG_ERR("Payload write failed, err %d", err);
+			} else {
+				LOG_INF("Sent letter 'A'");
+				dk_set_led_on(DK_LED1);
+			}
+		}
+	}
 }
 
 int main(void)
@@ -220,6 +228,12 @@ int main(void)
 		return 0;
 	}
 
+	err = dk_buttons_init(button_handler);
+	if (err) {
+		LOG_ERR("Buttons initialization failed, err %d", err);
+		return 0;
+	}
+
 	err = esb_initialize();
 	if (err) {
 		LOG_ERR("ESB initialization failed, err %d", err);
@@ -227,21 +241,10 @@ int main(void)
 	}
 
 	LOG_INF("Initialization complete");
-	LOG_INF("Sending test packet");
+	LOG_INF("Press Button 1 to send 'A'");
 
 	tx_payload.noack = false;
 	while (1) {
-		if (ready) {
-			ready = false;
-			esb_flush_tx();
-			leds_update(tx_payload.data[1]);
-
-			err = esb_write_payload(&tx_payload);
-			if (err) {
-				LOG_ERR("Payload write failed, err %d", err);
-			}
-			tx_payload.data[1]++;
-		}
 		k_sleep(K_MSEC(100));
 	}
 }
