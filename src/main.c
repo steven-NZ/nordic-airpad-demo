@@ -159,10 +159,11 @@ int esb_initialize(void)
 
 	config.protocol = ESB_PROTOCOL_ESB_DPL;
 	config.retransmit_delay = 600;
-	config.bitrate = ESB_BITRATE_2MBPS;
+	config.bitrate = ESB_BITRATE_1MBPS;
 	config.event_handler = event_handler;
 	config.mode = ESB_MODE_PTX;
 	config.selective_auto_ack = true;
+	config.tx_output_power = ESB_TX_POWER_8DBM;
 	if (IS_ENABLED(CONFIG_ESB_FAST_SWITCHING)) {
 		config.use_fast_ramp_up = true;
 	}
