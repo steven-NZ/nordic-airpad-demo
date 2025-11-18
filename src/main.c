@@ -15,6 +15,7 @@
 #include <zephyr/types.h>
 #include <dk_buttons_and_leds.h>
 #include "comm/esb_thread.h"
+#include "input/btn_handler.h"
 #if defined(CONFIG_CLOCK_CONTROL_NRF2)
 #include <hal/nrf_lrcconf.h>
 #endif
@@ -109,24 +110,6 @@ int clocks_start(void)
 BUILD_ASSERT(false, "No Clock Control driver");
 #endif /* defined(CONFIG_CLOCK_CONTROL_NRF2) */
 
-
-static void button_handler(uint32_t button_state, uint32_t has_changed)
-{
-	/* Handle button presses - only send on press, not release */
-	if (has_changed & button_state & DK_BTN1_MSK) {
-		esb_thread_send_char('A');
-	}
-	if (has_changed & button_state & DK_BTN2_MSK) {
-		esb_thread_send_char('B');
-	}
-	if (has_changed & button_state & DK_BTN3_MSK) {
-		esb_thread_send_button_event(3, true);
-	}
-	if (has_changed & button_state & DK_BTN4_MSK) {
-		esb_thread_send_button_event(4, true);
-	}
-}
-
 int main(void)
 {
 	int err;
@@ -144,9 +127,9 @@ int main(void)
 		return 0;
 	}
 
-	err = dk_buttons_init(button_handler);
+	err = btn_handler_init();
 	if (err) {
-		LOG_ERR("Buttons initialization failed, err %d", err);
+		LOG_ERR("Button handler initialization failed, err %d", err);
 		return 0;
 	}
 
@@ -157,7 +140,7 @@ int main(void)
 	}
 
 	LOG_INF("Initialization complete");
-	LOG_INF("Press Button 1 to send 'A', Button 2 to send 'B'");
+	LOG_INF("Button mapping: BTN1='A', BTN2='B', BTN3='C', BTN4='D'");
 
 	while (1) {
 		esb_thread_process();
