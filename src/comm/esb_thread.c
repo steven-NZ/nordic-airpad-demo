@@ -5,13 +5,19 @@
  */
 
 #include "esb_thread.h"
+#include "../input/btn_handler.h"
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <dk_buttons_and_leds.h>
 #include <esb.h>
-#include <string.h>
 
 LOG_MODULE_REGISTER(esb_thread, LOG_LEVEL_INF);
+
+/* Forward declaration of timer handler */
+static void esb_timer_handler(struct k_timer *timer);
+
+/* 10ms periodic timer for sending sensor data */
+K_TIMER_DEFINE(esb_timer, esb_timer_handler, NULL);
 
 /* ESB payload buffers */
 static struct esb_payload rx_payload;
@@ -46,6 +52,37 @@ static void event_handler(struct esb_evt const *event)
 		LOG_WRN("Unknown ESB event: %d", event->evt_id);
 		break;
 	}
+}
+
+/* Send current sensor data via ESB */
+static void esb_send_sensor_data(void)
+{
+	int err;
+	sensor_data_t packet;
+
+	/* Build sensor data packet */
+	packet.sequence_num = packet_sequence++;
+	packet.btn_state = btn_handler_get_state();
+	packet.timestamp_ms = k_uptime_get_32();
+
+	/* Update TX payload */
+	tx_payload.length = sizeof(sensor_data_t);
+	memcpy(tx_payload.data, &packet, sizeof(sensor_data_t));
+
+	LOG_DBG("Sending sensor data: btn=0x%02X, seq=%u",
+		packet.btn_state, packet.sequence_num);
+
+	/* Transmit packet */
+	err = esb_write_payload(&tx_payload);
+	if (err) {
+		LOG_ERR("Failed to write payload, err %d", err);
+	}
+}
+
+/* Timer handler - called every 10ms */
+static void esb_timer_handler(struct k_timer *timer)
+{
+	esb_send_sensor_data();
 }
 
 int esb_thread_init(void)
@@ -102,49 +139,11 @@ int esb_thread_init(void)
 
 	LOG_INF("ESB configuration complete");
 
+	/* Start periodic sensor data transmission timer (10ms) */
+	k_timer_start(&esb_timer, K_MSEC(10), K_MSEC(10));
+	LOG_INF("ESB periodic timer started (10ms)");
+
 	return 0;
-}
-
-void esb_thread_send_button_event(uint8_t button_num, bool pressed)
-{
-	int err;
-	button_packet_t packet;
-
-	/* Build button event packet */
-	packet.sequence_num = packet_sequence++;
-	packet.button_num = button_num;
-	packet.pressed = pressed ? 1 : 0;
-	packet.timestamp_ms = k_uptime_get_32();
-
-	/* Update TX payload */
-	tx_payload.length = sizeof(button_packet_t);
-	memcpy(tx_payload.data, &packet, sizeof(button_packet_t));
-
-	LOG_INF("Sending button event: btn=%d, pressed=%d, seq=%u",
-		button_num, pressed, packet.sequence_num);
-
-	/* Transmit packet */
-	err = esb_write_payload(&tx_payload);
-	if (err) {
-		LOG_ERR("Failed to write payload, err %d", err);
-	}
-}
-
-void esb_thread_send_char(char character)
-{
-	int err;
-
-	/* Update TX payload with single character */
-	tx_payload.length = 1;
-	tx_payload.data[0] = character;
-
-	LOG_INF("Sending character: '%c'", character);
-
-	/* Transmit packet */
-	err = esb_write_payload(&tx_payload);
-	if (err) {
-		LOG_ERR("Failed to write payload, err %d", err);
-	}
 }
 
 void esb_thread_process(void)
