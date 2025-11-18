@@ -9,12 +9,12 @@
 #include <zephyr/irq.h>
 #include <zephyr/logging/log.h>
 #include <nrf.h>
-#include <esb.h>
 #include <zephyr/device.h>
 #include <zephyr/devicetree.h>
 #include <zephyr/kernel.h>
 #include <zephyr/types.h>
 #include <dk_buttons_and_leds.h>
+#include "comm/esb_thread.h"
 #if defined(CONFIG_CLOCK_CONTROL_NRF2)
 #include <hal/nrf_lrcconf.h>
 #endif
@@ -26,44 +26,7 @@
 #include <hal/nrf_clock.h>
 #endif /* defined(NRF54LM20A_ENGA_XXAA) */
 
-LOG_MODULE_REGISTER(esb_ptx, CONFIG_ESB_PTX_APP_LOG_LEVEL);
-
-static bool ready = true;
-static struct esb_payload rx_payload;
-static struct esb_payload tx_payload = ESB_CREATE_PAYLOAD(0, 'A');
-
-#define _RADIO_SHORTS_COMMON                                                   \
-	(RADIO_SHORTS_READY_START_Msk | RADIO_SHORTS_END_DISABLE_Msk |         \
-	 RADIO_SHORTS_ADDRESS_RSSISTART_Msk |                                  \
-	 RADIO_SHORTS_DISABLED_RSSISTOP_Msk)
-
-void event_handler(struct esb_evt const *event)
-{
-	ready = true;
-
-	switch (event->evt_id) {
-	case ESB_EVENT_TX_SUCCESS:
-		LOG_DBG("TX SUCCESS EVENT");
-		dk_set_led_off(DK_LED1);
-		break;
-	case ESB_EVENT_TX_FAILED:
-		LOG_DBG("TX FAILED EVENT");
-		dk_set_led_off(DK_LED1);
-		break;
-	case ESB_EVENT_RX_RECEIVED:
-		while (esb_read_rx_payload(&rx_payload) == 0) {
-			LOG_DBG("Packet received, len %d : "
-				"0x%02x, 0x%02x, 0x%02x, 0x%02x, "
-				"0x%02x, 0x%02x, 0x%02x, 0x%02x",
-				rx_payload.length, rx_payload.data[0],
-				rx_payload.data[1], rx_payload.data[2],
-				rx_payload.data[3], rx_payload.data[4],
-				rx_payload.data[5], rx_payload.data[6],
-				rx_payload.data[7]);
-		}
-		break;
-	}
-}
+LOG_MODULE_REGISTER(main, CONFIG_ESB_PTX_APP_LOG_LEVEL);
 
 #if defined(CONFIG_CLOCK_CONTROL_NRF)
 int clocks_start(void)
@@ -146,68 +109,21 @@ int clocks_start(void)
 BUILD_ASSERT(false, "No Clock Control driver");
 #endif /* defined(CONFIG_CLOCK_CONTROL_NRF2) */
 
-int esb_initialize(void)
-{
-	int err;
-	/* These are arbitrary default addresses. In end user products
-	 * different addresses should be used for each set of devices.
-	 */
-	uint8_t base_addr_0[4] = {0xE7, 0xE7, 0xE7, 0xE7};
-	uint8_t base_addr_1[4] = {0xC2, 0xC2, 0xC2, 0xC2};
-	uint8_t addr_prefix[8] = {0xE7, 0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7, 0xC8};
-
-	struct esb_config config = ESB_DEFAULT_CONFIG;
-
-	config.protocol = ESB_PROTOCOL_ESB_DPL;
-	config.retransmit_delay = 600;
-	config.bitrate = ESB_BITRATE_1MBPS;
-	config.event_handler = event_handler;
-	config.mode = ESB_MODE_PTX;
-	config.selective_auto_ack = true;
-	config.tx_output_power = ESB_TX_POWER_8DBM;
-	if (IS_ENABLED(CONFIG_ESB_FAST_SWITCHING)) {
-		config.use_fast_ramp_up = true;
-	}
-
-	err = esb_init(&config);
-
-	if (err) {
-		return err;
-	}
-
-	err = esb_set_base_address_0(base_addr_0);
-	if (err) {
-		return err;
-	}
-
-	err = esb_set_base_address_1(base_addr_1);
-	if (err) {
-		return err;
-	}
-
-	err = esb_set_prefixes(addr_prefix, ARRAY_SIZE(addr_prefix));
-	if (err) {
-		return err;
-	}
-
-	return 0;
-}
 
 static void button_handler(uint32_t button_state, uint32_t has_changed)
 {
+	/* Handle button presses - only send on press, not release */
 	if (has_changed & button_state & DK_BTN1_MSK) {
-		if (ready) {
-			ready = false;
-			esb_flush_tx();
-
-			int err = esb_write_payload(&tx_payload);
-			if (err) {
-				LOG_ERR("Payload write failed, err %d", err);
-			} else {
-				LOG_INF("Sent letter 'A'");
-				dk_set_led_on(DK_LED1);
-			}
-		}
+		esb_thread_send_char('A');
+	}
+	if (has_changed & button_state & DK_BTN2_MSK) {
+		esb_thread_send_char('B');
+	}
+	if (has_changed & button_state & DK_BTN3_MSK) {
+		esb_thread_send_button_event(3, true);
+	}
+	if (has_changed & button_state & DK_BTN4_MSK) {
+		esb_thread_send_button_event(4, true);
 	}
 }
 
@@ -234,17 +150,17 @@ int main(void)
 		return 0;
 	}
 
-	err = esb_initialize();
+	err = esb_thread_init();
 	if (err) {
 		LOG_ERR("ESB initialization failed, err %d", err);
 		return 0;
 	}
 
 	LOG_INF("Initialization complete");
-	LOG_INF("Press Button 1 to send 'A'");
+	LOG_INF("Press Button 1 to send 'A', Button 2 to send 'B'");
 
-	tx_payload.noack = false;
 	while (1) {
+		esb_thread_process();
 		k_sleep(K_MSEC(100));
 	}
 }
