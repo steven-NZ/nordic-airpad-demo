@@ -10,13 +10,17 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-/* Button event packet structure */
+/* Unified sensor data packet structure */
 typedef struct {
     uint32_t sequence_num;
-    uint8_t button_num;
-    uint8_t pressed;
+    uint8_t btn_state;      /* 3 bits: btn1, btn2, btn3 (1=pressed, 0=released) */
     uint32_t timestamp_ms;
-} __attribute__((packed)) button_packet_t;
+    /* Future expansion:
+     * uint8_t cap_state;
+     * int16_t imu_accel_x, y, z;
+     * int16_t imu_gyro_x, y, z;
+     */
+} __attribute__((packed)) sensor_data_t;
 
 /**
  * Initialize ESB thread
@@ -26,21 +30,6 @@ typedef struct {
  * @return 0 on success, negative error code on failure
  */
 int esb_thread_init(void);
-
-/**
- * Send button event packet
- *
- * @param button_num Button number (1-4)
- * @param pressed true if pressed, false if released
- */
-void esb_thread_send_button_event(uint8_t button_num, bool pressed);
-
-/**
- * Send simple character payload
- *
- * @param character Character to send
- */
-void esb_thread_send_char(char character);
 
 /**
  * Process ESB events
