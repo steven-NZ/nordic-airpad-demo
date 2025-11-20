@@ -16,6 +16,7 @@
 #include <dk_buttons_and_leds.h>
 #include "comm/esb_thread.h"
 #include "input/btn_handler.h"
+#include "sensors/imu_handler.h"
 #if defined(CONFIG_CLOCK_CONTROL_NRF2)
 #include <hal/nrf_lrcconf.h>
 #endif
@@ -130,6 +131,12 @@ int main(void)
 	err = btn_handler_init();
 	if (err) {
 		LOG_ERR("Button handler initialization failed, err %d", err);
+		return 0;
+	}
+
+	err = imu_handler_init();
+	if (err) {
+		LOG_ERR("IMU handler initialization failed, err %d", err);
 		return 0;
 	}
 

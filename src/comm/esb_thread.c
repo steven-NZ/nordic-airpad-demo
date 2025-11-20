@@ -6,6 +6,7 @@
 
 #include "esb_thread.h"
 #include "../input/btn_handler.h"
+#include "../sensors/imu_handler.h"
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <dk_buttons_and_leds.h>
@@ -13,11 +14,19 @@
 
 LOG_MODULE_REGISTER(esb_thread, LOG_LEVEL_INF);
 
-/* Forward declaration of timer handler */
+/* Forward declaration of timer handlers and work functions */
 static void esb_timer_handler(struct k_timer *timer);
+static void imu_timer_handler(struct k_timer *timer);
+static void imu_work_handler(struct k_work *work);
 
 /* 10ms periodic timer for sending sensor data */
 K_TIMER_DEFINE(esb_timer, esb_timer_handler, NULL);
+
+/* 5ms periodic timer for IMU data reading */
+K_TIMER_DEFINE(imu_timer, imu_timer_handler, NULL);
+
+/* Work queue item for IMU reading (deferred from ISR) */
+K_WORK_DEFINE(imu_work, imu_work_handler);
 
 /* ESB payload buffers */
 static struct esb_payload rx_payload;
@@ -85,6 +94,19 @@ static void esb_timer_handler(struct k_timer *timer)
 	esb_send_sensor_data();
 }
 
+/* IMU work handler - runs in thread context (safe for I2C) */
+static void imu_work_handler(struct k_work *work)
+{
+	imu_handler_read();
+}
+
+/* IMU timer handler - called every 5ms (200Hz) in ISR context */
+static void imu_timer_handler(struct k_timer *timer)
+{
+	/* Submit work to system work queue (runs in thread context) */
+	k_work_submit(&imu_work);
+}
+
 int esb_thread_init(void)
 {
 	int err;
@@ -142,6 +164,10 @@ int esb_thread_init(void)
 	/* Start periodic sensor data transmission timer (10ms) */
 	k_timer_start(&esb_timer, K_MSEC(10), K_MSEC(10));
 	LOG_INF("ESB periodic timer started (10ms)");
+
+	/* Start periodic IMU data reading timer (5ms) */
+	k_timer_start(&imu_timer, K_MSEC(5), K_MSEC(5));
+	LOG_INF("IMU periodic timer started (5ms)");
 
 	return 0;
 }
