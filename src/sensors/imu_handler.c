@@ -18,7 +18,7 @@ int imu_handler_init(void)
 	int retry_count = 0;
 	const int max_retries = 5;
 
-	k_msleep(100);
+	k_msleep(20);
 
 	/* Wait for device to be ready with retries */
 	while (!device_is_ready(imu_dev) && retry_count < max_retries) {
@@ -38,11 +38,15 @@ int imu_handler_init(void)
 	return 0;
 }
 
-int imu_handler_read(void)
+int imu_handler_read(imu_data_t *data)
 {
 	struct sensor_value accel[3];
 	struct sensor_value gyro[3];
 	int err;
+
+	if (!data) {
+		return -EINVAL;
+	}
 
 	/* Fetch new sample from sensor */
 	err = sensor_sample_fetch(imu_dev);
@@ -65,19 +69,17 @@ int imu_handler_read(void)
 		return err;
 	}
 
-	/* Convert sensor_value to double and log
-	 * Accel: m/s²
-	 * Gyro: °/s (degrees per second)
+	/* Convert sensor_value to int16_t
+	 * Scale factor: multiply by 100 to preserve precision
+	 * Accel: m/s² * 100 (e.g., 9.81 m/s² -> 981)
+	 * Gyro: °/s * 100 (e.g., 45.5 °/s -> 4550)
 	 */
-	double ax = sensor_value_to_double(&accel[0]);
-	double ay = sensor_value_to_double(&accel[1]);
-	double az = sensor_value_to_double(&accel[2]);
-	double gx = sensor_value_to_double(&gyro[0]);
-	double gy = sensor_value_to_double(&gyro[1]);
-	double gz = sensor_value_to_double(&gyro[2]);
-
-	LOG_INF("IMU: Accel[%.2f, %.2f, %.2f] m/s² Gyro[%.2f, %.2f, %.2f] °/s",
-		ax, ay, az, gx, gy, gz);
+	data->accel_x = (int16_t)(sensor_value_to_double(&accel[0]) * 100);
+	data->accel_y = (int16_t)(sensor_value_to_double(&accel[1]) * 100);
+	data->accel_z = (int16_t)(sensor_value_to_double(&accel[2]) * 100);
+	data->gyro_x = (int16_t)(sensor_value_to_double(&gyro[0]) * 100);
+	data->gyro_y = (int16_t)(sensor_value_to_double(&gyro[1]) * 100);
+	data->gyro_z = (int16_t)(sensor_value_to_double(&gyro[2]) * 100);
 
 	return 0;
 }
