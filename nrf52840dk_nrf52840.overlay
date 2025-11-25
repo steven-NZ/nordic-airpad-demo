@@ -1,0 +1,48 @@
+/*
+ * Device Tree Overlay for Nordic Airpad Demo
+ * Board: nRF52840 DK
+ * IMU: ICM-42670-P on I2C0
+ */
+
+/* I2C Pin Configuration */
+&pinctrl {
+	i2c0_default: i2c0_default {
+		group1 {
+			psels = <NRF_PSEL(TWIM_SDA, 0, 26)>,
+			        <NRF_PSEL(TWIM_SCL, 0, 27)>;
+			bias-pull-up;
+		};
+	};
+
+	i2c0_sleep: i2c0_sleep {
+		group1 {
+			psels = <NRF_PSEL(TWIM_SDA, 0, 26)>,
+			        <NRF_PSEL(TWIM_SCL, 0, 27)>;
+			low-power-enable;
+			bias-pull-up;
+		};
+	};
+};
+
+/* I2C Bus Configuration */
+&i2c0 {
+	compatible = "nordic,nrf-twim";
+	status = "okay";
+	pinctrl-0 = <&i2c0_default>;
+	pinctrl-1 = <&i2c0_sleep>;
+	pinctrl-names = "default", "sleep";
+	clock-frequency = <I2C_BITRATE_STANDARD>;  /* 100 kHz */
+
+	/* ICM-42670-P IMU */
+	icm42670p: icm42670p@68 {
+		compatible = "invensense,icm42670p";
+		reg = <0x68>;
+		status = "okay";
+
+		/* Sensor configuration - 200 Hz to match 5ms polling */
+		accel-hz = <200>;
+		accel-fs = <8>;    /* ±16g full scale */
+		gyro-hz = <200>;
+		gyro-fs = <1000>;   /* ±2000 dps full scale */
+	};
+};

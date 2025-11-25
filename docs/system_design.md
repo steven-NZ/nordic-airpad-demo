@@ -28,26 +28,36 @@ Embedded device that collects sensor inputs (IMU, capacitive touch, buttons), tr
 
 ### Threading Model
 ```
-┌─────────────────────────────────────────────────┐
-│              Main Thread (Init Only)            │
-└─────────────────────────────────────────────────┘
-           │            │            │
-    ┌──────▼────┐  ┌───▼─────┐  ┌──▼──────┐
-    │  Input    │  │   ESB   │  │ Output  │
-    │  Thread   │  │  Thread │  │ Thread  │
-    │  (Prio 5) │  │ (Prio 7)│  │ (Prio 8)│
-    └───────────┘  └─────────┘  └─────────┘
+┌─────────────────────────────────────────────┐
+│         Main Thread (Init + Idle)           │
+└─────────────────────────────────────────────┘
+                      │
+              ┌───────▼──────────┐
+              │  Central Thread  │  (Single unified thread)
+              │   (Priority 5)   │
+              └──────────────────┘
+                      │
+        ┌─────────────┼─────────────┐
+        │             │             │
+   ┌────▼────┐   ┌───▼────┐   ┌───▼─────┐
+   │   IMU   │   │  ESB   │   │ Output  │
+   │Handler  │   │Handler │   │(future) │
+   └─────────┘   └────────┘   └─────────┘
+
+        + Button ISRs (interrupt-based)
 ```
 
-**Thread Priorities**: Input (5) > ESB (7) > Output (8) > Main (10)
+**Thread Priorities**: Central Thread (5)
 
 ### Communication Flow
 ```
-[Inputs] → MsgQ → [ESB Thread] ⇄ Radio ⇄ Remote Device
-                       ↓
-                     MsgQ
-                       ↓
-                  [Output Thread] → [LEDs/Vibration]
+Central Thread (10ms period):
+  ├─ Read IMU (imu_handler_read)
+  ├─ Read Buttons (btn_handler_get_state)
+  ├─ Package & Send ESB (esb_handler_send)
+  └─ Receive & Process ESB (esb_handler_receive)
+
+Button ISRs ────────> button_state (shared variable)
 ```
 
 ---
@@ -95,34 +105,31 @@ typedef struct {
 ```c
 typedef struct {
     uint32_t sequence_num;
-    input_event_t input_event;
-    imu_data_t imu;             // xyz accel/gyro
-    uint8_t cap_state;
+    uint8_t btn_state;          // 3 bits: btn1, btn2, btn3
     uint32_t timestamp_ms;
-} __packed sensor_packet_t;
+} __packed sensor_data_t;
 ```
+
+### IMU Data
+IMU data is read every 10ms and logged to console (not transmitted via ESB)
 
 ### Output Command Format
-```c
-typedef struct {
-    uint8_t command_id;
-    pattern_config_t led_pattern;
-    pattern_config_t vib_pattern;
-} __packed output_command_t;
-```
+Received ESB data is currently logged (LED/vibration control not implemented)
 
-### ESB Thread Responsibilities
-1. Poll `input_to_esb_queue` for input events (timeout: 100ms)
-2. Periodically read IMU (every 100ms or on data-ready)
-3. Package and transmit sensor packets
-4. Receive output commands from remote device
-5. Forward commands to `esb_to_output_queue`
+### Central Thread Responsibilities
+1. Read and log IMU sensor data via `imu_handler_read()`
+2. Read button state via `btn_handler_get_state()`
+3. Package button data into `sensor_data_t`
+4. Transmit via `esb_handler_send()`
+5. Receive and log commands via `esb_handler_receive()`
+6. Period: 10ms (100Hz)
 
 ### Configuration
-- Payload size: 32 bytes (configurable)
-- TX power: 0dBm (configurable)
+- Payload size: 32 bytes
+- TX power: 8dBm (maximum range)
 - Retry count: 3
 - ACK enabled
+- Bitrate: 1Mbps
 
 ---
 
@@ -168,15 +175,15 @@ typedef struct {
 
 ---
 
-## Message Queues
+## Inter-Module Communication
 
-```c
-// Input → ESB
-K_MSGQ_DEFINE(input_to_esb_queue, sizeof(input_event_t), 10, 4);
+No message queues are used. The central thread directly calls hardware handler functions:
+- `imu_handler_read()` - Returns IMU data via output parameter
+- `btn_handler_get_state()` - Returns current button state
+- `esb_handler_send()` - Sends sensor packet via ESB
+- `esb_handler_receive()` - Polls for received ESB data
 
-// ESB → Output  
-K_MSGQ_DEFINE(esb_to_output_queue, sizeof(output_command_t), 10, 4);
-```
+Button state is shared via a static variable updated by GPIO interrupts.
 
 ---
 
@@ -216,48 +223,41 @@ K_MSGQ_DEFINE(esb_to_output_queue, sizeof(output_command_t), 10, 4);
 
 ```
 src/
-├── main.c                      # System init, thread creation
+├── main.c                      # System initialization
+├── central_thread.c            # Main orchestration thread (10ms period)
 ├── input/
-│   ├── btn_handler.c             # Button state machine
-│   ├── cap_handler.c      # Cap sensor state machine  
-│   └── input_thread.c          # Input event aggregation
+│   └── btn_handler.c           # Button interrupt handling
 ├── sensors/
-│   └── imu_reader.c            # IMU polling/interrupt handling
-├── comm/
-│   └── esb_thread.c            # ESB TX/RX and packet handling
-├── output/
-│   ├── led_patterns.c          # LED pattern engine
-│   ├── vib_patterns.c          # Vibration pattern engine
-│   └── output_thread.c         # Output coordination
-└── common/
-    ├── events.h                # Event type definitions
-    └── patterns.h              # Pattern structures
+│   └── imu_handler.c           # IMU I2C interface (hardware layer)
+└── comm/
+    └── esb_handler.c           # ESB hardware interface
 ```
+
+**Hardware Layer**: `imu_handler`, `btn_handler`, `esb_handler` provide clean hardware interfaces
+**Application Layer**: `central_thread` orchestrates all hardware calls
 
 ---
 
 ## Key Design Decisions
 
+### Why Single Central Thread?
+- Simpler architecture - no message queue overhead
+- Direct function calls reduce latency
+- ESB communication handled by RTOS (no separate thread needed)
+- Easier to reason about timing and execution order
+- Clean separation: Hardware handlers vs. Application orchestration
+
 ### Why Interrupts for Buttons?
 - Lower latency (immediate response)
 - Reduced power consumption (no polling)
 - Cleaner code with Zephyr's GPIO callback API
+- Shared state variable is thread-safe for reads
 
-### Why State Machines?
-- Clear, maintainable input interpretation
-- Easy to add new gesture types
-- Separates timing logic from application logic
-
-### Why Message Queues?
-- Thread-safe communication
-- Decouples producers/consumers
-- Built-in blocking/timeout support
-
-### Why Separate Threads?
-- Input: High priority for responsiveness
-- ESB: Independent radio timing requirements
-- Output: Non-blocking pattern generation
-- Clean separation of concerns
+### Why Hardware Handler Layer?
+- Clean abstraction of hardware interfaces
+- Easy to test and maintain
+- Reusable across different application threads
+- Separates concerns: hardware access vs. application logic
 
 ---
 
@@ -265,19 +265,17 @@ src/
 
 | Task | Period | Max Duration |
 |------|--------|--------------|
-| Button debounce | 50ms | 5ms |
-| IMU read | 100ms | 10ms |
-| ESB TX | 100ms | 15ms |
-| LED update | 33ms | 8ms |
-| Vibration update | 20ms | 2ms |
+| Central Thread Loop | 10ms | 8ms |
+| - IMU read | 10ms | 3ms |
+| - ESB TX | 10ms | 4ms |
+| - ESB RX check | 10ms | 1ms |
+| Button ISR | Event | <100μs |
 
 ---
 
-## Stack Sizes (Recommended)
+## Stack Sizes
 
-- Input Thread: 2KB
-- ESB Thread: 2KB  
-- Output Thread: 2KB
+- Central Thread: 2KB
 - System Workqueue: 2KB
 - Main: 1KB
 

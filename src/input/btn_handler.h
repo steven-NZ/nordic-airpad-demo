@@ -1,34 +1,78 @@
 /*
  * Button Handler Interface
- *
- * Handles button press detection and event generation
  */
 
 #ifndef BTN_HANDLER_H_
 #define BTN_HANDLER_H_
 
 #include <stdint.h>
+#include "../drivers/driver_framework.h"
+
+/* Button state structure */
+typedef struct {
+	uint8_t button1 : 1;  /* Button 1 state (1=pressed, 0=released) */
+	uint8_t button2 : 1;  /* Button 2 state */
+	uint8_t button3 : 1;  /* Button 3 state */
+	uint8_t reserved : 5; /* Reserved for future buttons */
+} __attribute__((packed)) btn_state_t;
+
+/* Button-specific ioctl commands */
+#define BTN_IOCTL_GET_RAW_STATE     0x2001  /* Get raw button bits (uint8_t) */
+#define BTN_IOCTL_GET_PRESS_COUNT   0x2002  /* Get press count for button */
+#define BTN_IOCTL_RESET_COUNTERS    0x2003  /* Reset all button counters */
+
+/* Button press counter structure (for ioctl) */
+typedef struct {
+	uint32_t button1_count;
+	uint32_t button2_count;
+	uint32_t button3_count;
+} btn_press_counts_t;
 
 /**
- * Initialize button handler
+ * @brief Open the button driver
  *
- * Sets up button interrupt handling using DK buttons library
- * Configures buttons 1-3 with press/release detection
+ * Initializes button GPIO interrupts and returns a file descriptor
+ * for accessing the driver. Only one instance is supported.
  *
- * @return 0 on success, negative error code on failure
+ * @param flags Open flags (reserved for future use, pass 0)
+ * @return File descriptor on success, DRIVER_FD_INVALID on failure
  */
-int btn_handler_init(void);
+driver_fd_t btn_open(uint32_t flags);
 
 /**
- * Get current button state
+ * @brief Close the button driver
  *
- * Returns the current state of buttons 1-3 as a 3-bit value
- * Bit 0: Button 1 (1=pressed, 0=released)
- * Bit 1: Button 2 (1=pressed, 0=released)
- * Bit 2: Button 3 (1=pressed, 0=released)
+ * Releases resources associated with the button driver instance.
  *
- * @return 3-bit button state value (0x00-0x07)
+ * @param fd File descriptor returned by btn_open()
+ * @return 0 on success, negative errno code on failure
  */
-uint8_t btn_handler_get_state(void);
+int btn_close(driver_fd_t fd);
+
+/**
+ * @brief Read button state
+ *
+ * Reads the current button state. The buffer must be at least
+ * sizeof(btn_state_t) bytes or 1 byte for raw button bits.
+ *
+ * @param fd File descriptor returned by btn_open()
+ * @param buf Pointer to buffer to store button state
+ * @param count Size of buffer
+ * @return Number of bytes read on success, negative errno code on failure
+ */
+ssize_t btn_read(driver_fd_t fd, void *buf, size_t count);
+
+/**
+ * @brief Control the button driver
+ *
+ * Performs control operations on the button driver such as reading
+ * press counters, resetting counters, etc.
+ *
+ * @param fd File descriptor returned by btn_open()
+ * @param cmd ioctl command (BTN_IOCTL_*)
+ * @param arg Command-specific argument (depends on cmd)
+ * @return 0 on success, negative errno code on failure
+ */
+int btn_ioctl(driver_fd_t fd, unsigned int cmd, void *arg);
 
 #endif /* BTN_HANDLER_H_ */
