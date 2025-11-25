@@ -14,9 +14,6 @@
 #include <zephyr/kernel.h>
 #include <zephyr/types.h>
 #include <dk_buttons_and_leds.h>
-#include "comm/esb_handler.h"
-#include "input/btn_handler.h"
-#include "sensors/imu_handler.h"
 #include "central_thread.h"
 #if defined(CONFIG_CLOCK_CONTROL_NRF2)
 #include <hal/nrf_lrcconf.h>
@@ -128,28 +125,13 @@ int main(void)
 		LOG_ERR("LEDs initialization failed, err %d", err);
 	}
 
-	err = btn_handler_init();
-	if (err) {
-		LOG_ERR("Button handler initialization failed, err %d", err);
-	}
-
-	err = imu_handler_init();
-	if (err) {
-		LOG_ERR("IMU handler initialization failed, err %d", err);
-	}
-
-	err = esb_handler_init();
-	if (err) {
-		LOG_ERR("ESB initialization failed, err %d", err);
-	}
-
 	err = central_thread_init();
 	if (err) {
 		LOG_ERR("Central thread initialization failed, err %d", err);
 		return 0;
 	}
 
-	LOG_INF("Initialization complete");
+	LOG_INF("Initialization complete - all drivers auto-initialized");
 	LOG_INF("Button mapping: BTN1='A', BTN2='B', BTN3='C', BTN4='D'");
 
 	return 0;

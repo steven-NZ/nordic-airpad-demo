@@ -1,7 +1,5 @@
 /*
  * ESB Hardware Handler Interface
- *
- * Provides hardware interface for Enhanced ShockBurst protocol
  */
 
 #ifndef ESB_HANDLER_H_
@@ -10,6 +8,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include "../drivers/driver_framework.h"
 
 /* Unified sensor data packet structure */
 typedef struct {
@@ -18,30 +17,83 @@ typedef struct {
 	uint32_t timestamp_ms;
 } __attribute__((packed)) sensor_data_t;
 
-/**
- * Initialize ESB hardware
- *
- * Sets up ESB protocol with configuration parameters
- *
- * @return 0 on success, negative error code on failure
- */
-int esb_handler_init(void);
+/* ESB-specific ioctl commands */
+#define ESB_IOCTL_SET_TX_POWER      0x3001  /* Set TX power (int8_t) */
+#define ESB_IOCTL_GET_TX_POWER      0x3002  /* Get TX power (int8_t*) */
+#define ESB_IOCTL_SET_BASE_ADDR_0   0x3003  /* Set base address 0 (uint8_t[4]) */
+#define ESB_IOCTL_SET_BASE_ADDR_1   0x3004  /* Set base address 1 (uint8_t[4]) */
+#define ESB_IOCTL_SET_ADDR_PREFIX   0x3005  /* Set address prefixes (uint8_t[8]) */
+#define ESB_IOCTL_GET_TX_SUCCESS    0x3006  /* Get TX success count (uint32_t*) */
+#define ESB_IOCTL_GET_TX_FAILED     0x3007  /* Get TX failed count (uint32_t*) */
+#define ESB_IOCTL_GET_RX_COUNT      0x3008  /* Get RX packet count (uint32_t*) */
+#define ESB_IOCTL_RESET_STATS       0x3009  /* Reset statistics counters */
+
+/* ESB statistics structure */
+typedef struct {
+	uint32_t tx_success_count;
+	uint32_t tx_failed_count;
+	uint32_t rx_count;
+} esb_stats_t;
 
 /**
- * Send sensor data packet via ESB
+ * @brief Open the ESB driver
  *
- * @param data Pointer to sensor data to transmit
- * @return 0 on success, negative error code on failure
+ * Initializes the Enhanced ShockBurst radio and returns a file descriptor
+ * for accessing the driver. Only one instance is supported.
+ *
+ * @param flags Open flags (reserved for future use, pass 0)
+ * @return File descriptor on success, DRIVER_FD_INVALID on failure
  */
-int esb_handler_send(const sensor_data_t *data);
+driver_fd_t esb_open(uint32_t flags);
 
 /**
- * Receive data from ESB
+ * @brief Close the ESB driver
  *
- * @param buf Buffer to store received data
- * @param len Pointer to buffer size (input) and received length (output)
- * @return 0 on success, -ENODATA if no data available, negative error code on failure
+ * Releases resources associated with the ESB driver instance and
+ * disables the radio.
+ *
+ * @param fd File descriptor returned by esb_open()
+ * @return 0 on success, negative errno code on failure
  */
-int esb_handler_receive(uint8_t *buf, size_t *len);
+int esb_close(driver_fd_t fd);
+
+/**
+ * @brief Read received data from ESB
+ *
+ * Reads received packets from the ESB RX FIFO. Non-blocking operation
+ * returns DRIVER_ERR_AGAIN if no data is available.
+ *
+ * @param fd File descriptor returned by esb_open()
+ * @param buf Pointer to buffer to store received data
+ * @param count Size of buffer
+ * @return Number of bytes read on success, negative errno code on failure
+ */
+ssize_t esb_read(driver_fd_t fd, void *buf, size_t count);
+
+/**
+ * @brief Write data to ESB for transmission
+ *
+ * Writes a packet to the ESB TX FIFO for transmission. The packet
+ * should typically be a sensor_data_t structure.
+ *
+ * @param fd File descriptor returned by esb_open()
+ * @param buf Pointer to data to transmit
+ * @param count Size of data to transmit
+ * @return Number of bytes written on success, negative errno code on failure
+ */
+ssize_t esb_write(driver_fd_t fd, const void *buf, size_t count);
+
+/**
+ * @brief Control the ESB driver
+ *
+ * Performs control operations on the ESB driver such as configuring
+ * TX power, addresses, reading statistics, etc.
+ *
+ * @param fd File descriptor returned by esb_open()
+ * @param cmd ioctl command (ESB_IOCTL_*)
+ * @param arg Command-specific argument (depends on cmd)
+ * @return 0 on success, negative errno code on failure
+ */
+int esb_ioctl(driver_fd_t fd, unsigned int cmd, void *arg);
 
 #endif /* ESB_HANDLER_H_ */
