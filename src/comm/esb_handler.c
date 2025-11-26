@@ -266,8 +266,7 @@ ssize_t esb_write(driver_fd_t fd, const void *buf, size_t count)
 	/* For sensor_data_t, add debug logging */
 	if (count == sizeof(sensor_data_t)) {
 		const sensor_data_t *data = (const sensor_data_t *)buf;
-		LOG_DBG("Sending sensor data: btn=0x%02X, seq=%u",
-			data->btn_state, data->sequence_num);
+		LOG_DBG("Sending sensor data: btn=0x%02X", data->btn_state);
 	}
 
 	/* Transmit packet */

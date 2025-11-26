@@ -12,10 +12,21 @@
 
 /* Unified sensor data packet structure */
 typedef struct {
-	uint32_t sequence_num;
 	uint8_t btn_state;      /* 3 bits: btn1, btn2, btn3 (1=pressed, 0=released) */
-	uint32_t timestamp_ms;
+	int16_t quat_w;         /* Quaternion w component (scaled by 32767) */
+	int16_t quat_x;         /* Quaternion x component (scaled by 32767) */
+	int16_t quat_y;         /* Quaternion y component (scaled by 32767) */
+	int16_t quat_z;         /* Quaternion z component (scaled by 32767) */
 } __attribute__((packed)) sensor_data_t;
+
+/* Quaternion conversion constants
+ * Quaternion components are normalized floats in range [-1.0, 1.0]
+ * Scale factor: INT16_MAX (32767) for maximum resolution
+ */
+#define QUAT_SCALE_FACTOR 32767
+
+/* Helper macro for quaternion float to int16_t conversion */
+#define QUAT_FLOAT_TO_INT16(f) ((int16_t)((f) * QUAT_SCALE_FACTOR))
 
 /* ESB-specific ioctl commands */
 #define ESB_IOCTL_SET_TX_POWER      0x3001  /* Set TX power (int8_t) */

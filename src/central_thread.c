@@ -28,9 +28,6 @@ static driver_fd_t esb_fd = DRIVER_FD_INVALID;
 /* IMU fusion state */
 static imu_fusion_state_t *fusion_state = NULL;
 
-/* Packet sequence number */
-static uint32_t packet_sequence = 0;
-
 /* Central thread entry point */
 static void central_thread_entry(void *p1, void *p2, void *p3)
 {
@@ -90,6 +87,7 @@ static void central_thread_entry(void *p1, void *p2, void *p3)
 	while (1) {
 		/* Read IMU sensor data */
 		imu_data_t imu_data;
+		imu_fusion_output_t fusion_output = {0};
 		result = imu_read(imu_fd, &imu_data, sizeof(imu_data));
 		if (result < 0) {
 			LOG_WRN("IMU read failed: %d", (int)result);
@@ -109,7 +107,6 @@ static void central_thread_entry(void *p1, void *p2, void *p3)
 			uint64_t timestamp_us = k_uptime_get() * 1000ULL;
 
 			/* Update fusion */
-			imu_fusion_output_t fusion_output;
 			int ret = imu_fusion_update(fusion_state, &accel, &gyro,
 			                            timestamp_us, &fusion_output);
 
@@ -140,10 +137,23 @@ static void central_thread_entry(void *p1, void *p2, void *p3)
 			btn_state_raw = 0;
 		}
 
-		/* Build sensor data packet */
-		sensor_packet.sequence_num = packet_sequence++;
+		/* Build sensor data packet with quaternion */
 		sensor_packet.btn_state = btn_state_raw;
-		sensor_packet.timestamp_ms = k_uptime_get_32();
+
+		/* Get latest quaternion from fusion output (already computed in lines 91-134) */
+		if (fusion_output.valid) {
+			/* Convert quaternion float to int16_t with scaling */
+			sensor_packet.quat_w = QUAT_FLOAT_TO_INT16(fusion_output.orientation.w);
+			sensor_packet.quat_x = QUAT_FLOAT_TO_INT16(fusion_output.orientation.x);
+			sensor_packet.quat_y = QUAT_FLOAT_TO_INT16(fusion_output.orientation.y);
+			sensor_packet.quat_z = QUAT_FLOAT_TO_INT16(fusion_output.orientation.z);
+		} else {
+			/* Fusion not ready - send identity quaternion (no rotation) */
+			sensor_packet.quat_w = QUAT_FLOAT_TO_INT16(1.0f);
+			sensor_packet.quat_x = 0;
+			sensor_packet.quat_y = 0;
+			sensor_packet.quat_z = 0;
+		}
 
 		/* Send sensor data via ESB */
 		result = esb_write(esb_fd, &sensor_packet, sizeof(sensor_packet));
