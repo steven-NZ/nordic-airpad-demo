@@ -94,18 +94,16 @@ static void central_thread_entry(void *p1, void *p2, void *p3)
 		if (result < 0) {
 			LOG_WRN("IMU read failed: %d", (int)result);
 		} else {
-			/* Convert int16_t (scaled ×100) to float SI units */
+			/*  Accel: m/s², Gyro: rad/s */
 			vector3_t accel, gyro;
 
-			/* Accel: int16 × 0.01 = m/s² */
-			accel.x = imu_data.accel_x * 0.01f;
-			accel.y = imu_data.accel_y * 0.01f;
-			accel.z = imu_data.accel_z * 0.01f;
+			accel.x = imu_data.accel_x;
+			accel.y = imu_data.accel_y;
+			accel.z = imu_data.accel_z;
 
-			/* Gyro: int16 × 0.01 = rad/s */
-			gyro.x = imu_data.gyro_x * 0.01f;
-			gyro.y = imu_data.gyro_y * 0.01f;
-			gyro.z = imu_data.gyro_z * 0.01f;
+			gyro.x = imu_data.gyro_x;
+			gyro.y = imu_data.gyro_y;
+			gyro.z = imu_data.gyro_z;
 
 			/* Get timestamp (convert ms to μs) */
 			uint64_t timestamp_us = k_uptime_get() * 1000ULL;
