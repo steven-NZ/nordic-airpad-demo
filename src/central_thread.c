@@ -8,6 +8,8 @@
 #include "comm/esb_handler.h"
 #include "input/btn_handler.h"
 #include "sensors/imu_handler.h"
+#include "sensors/imu_fusion.h"
+#include "sensors/imu_math.h"
 #include "drivers/driver_framework.h"
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
@@ -22,6 +24,9 @@ LOG_MODULE_REGISTER(central_thread, LOG_LEVEL_INF);
 static driver_fd_t imu_fd = DRIVER_FD_INVALID;
 static driver_fd_t btn_fd = DRIVER_FD_INVALID;
 static driver_fd_t esb_fd = DRIVER_FD_INVALID;
+
+/* IMU fusion state */
+static imu_fusion_state_t *fusion_state = NULL;
 
 /* Packet sequence number */
 static uint32_t packet_sequence = 0;
@@ -61,6 +66,25 @@ static void central_thread_entry(void *p1, void *p2, void *p3)
 	}
 	LOG_INF("ESB driver opened with fd=%d", esb_fd);
 
+	/* Initialize IMU fusion */
+	imu_fusion_config_t fusion_config = {
+		.slerp_power = 0.02f,      /* 2% correction per sample */
+		.enable_gyro = true,
+		.enable_accel = true,
+		.sample_rate_hz = 100
+	};
+
+	fusion_state = imu_fusion_init(&fusion_config);
+	if (!fusion_state) {
+		LOG_ERR("Failed to initialize IMU fusion");
+		esb_close(esb_fd);
+		btn_close(btn_fd);
+		imu_close(imu_fd);
+		return;
+	}
+	LOG_INF("IMU fusion initialized (SLERP power: %.2f)",
+	        (double)fusion_config.slerp_power);
+
 	LOG_INF("All drivers opened successfully");
 
 	while (1) {
@@ -70,9 +94,43 @@ static void central_thread_entry(void *p1, void *p2, void *p3)
 		if (result < 0) {
 			LOG_WRN("IMU read failed: %d", (int)result);
 		} else {
-			LOG_INF("IMU: Accel[%d, %d, %d] Gyro[%d, %d, %d]",
-				imu_data.accel_x, imu_data.accel_y, imu_data.accel_z,
-				imu_data.gyro_x, imu_data.gyro_y, imu_data.gyro_z);
+			/*  Accel: m/s², Gyro: rad/s */
+			vector3_t accel, gyro;
+
+			accel.x = imu_data.accel_x;
+			accel.y = imu_data.accel_y;
+			accel.z = imu_data.accel_z;
+
+			gyro.x = imu_data.gyro_x;
+			gyro.y = imu_data.gyro_y;
+			gyro.z = imu_data.gyro_z;
+
+			/* Get timestamp (convert ms to μs) */
+			uint64_t timestamp_us = k_uptime_get() * 1000ULL;
+
+			/* Update fusion */
+			imu_fusion_output_t fusion_output;
+			int ret = imu_fusion_update(fusion_state, &accel, &gyro,
+			                            timestamp_us, &fusion_output);
+
+			if (ret == 0 && fusion_output.valid) {
+				/* Log every 10th sample (10Hz) to reduce verbosity */
+				static uint32_t log_counter = 0;
+				if (++log_counter >= 10) {
+					log_counter = 0;
+					LOG_INF("Quat[w:%.3f x:%.3f y:%.3f z:%.3f] "
+					        "Euler[R:%.1f° P:%.1f° Y:%.1f°]",
+					        (double)fusion_output.orientation.w,
+					        (double)fusion_output.orientation.x,
+					        (double)fusion_output.orientation.y,
+					        (double)fusion_output.orientation.z,
+					        (double)(fusion_output.euler.roll * IMU_RAD_TO_DEG),
+					        (double)(fusion_output.euler.pitch * IMU_RAD_TO_DEG),
+					        (double)(fusion_output.euler.yaw * IMU_RAD_TO_DEG));
+				}
+			} else {
+				LOG_WRN("Fusion update failed: %d", ret);
+			}
 		}
 
 		/* Read button state */
@@ -110,6 +168,9 @@ static void central_thread_entry(void *p1, void *p2, void *p3)
 	}
 
 	/* Cleanup (never reached for now) */
+	if (fusion_state) {
+		imu_fusion_destroy(fusion_state);
+	}
 	esb_close(esb_fd);
 	btn_close(btn_fd);
 	imu_close(imu_fd);

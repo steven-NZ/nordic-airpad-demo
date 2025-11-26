@@ -8,14 +8,18 @@
 #include <stdint.h>
 #include "../drivers/driver_framework.h"
 
-/* IMU sensor data structure */
+/* IMU sensor data structure
+ * All values in SI units:
+ * - Accel: m/s²
+ * - Gyro: rad/s
+ */
 typedef struct {
-	int16_t accel_x;
-	int16_t accel_y;
-	int16_t accel_z;
-	int16_t gyro_x;
-	int16_t gyro_y;
-	int16_t gyro_z;
+	float accel_x;
+	float accel_y;
+	float accel_z;
+	float gyro_x;
+	float gyro_y;
+	float gyro_z;
 } __attribute__((packed)) imu_data_t;
 
 /* IMU-specific ioctl commands */

@@ -190,17 +190,16 @@ ssize_t imu_read(driver_fd_t fd, void *buf, size_t count)
 		return DRIVER_ERR_IO;
 	}
 
-	/* Convert sensor_value to int16_t
-	 * Scale factor: multiply by 100 to preserve precision
-	 * Accel: m/s² * 100 (e.g., 9.81 m/s² -> 981)
-	 * Gyro: °/s * 100 (e.g., 45.5 °/s -> 4550)
+	/* Convert sensor_value to float (direct, no scaling)
+	 * Accel: m/s²
+	 * Gyro: rad/s
 	 */
-	data->accel_x = (int16_t)(sensor_value_to_double(&accel[0]) * 100);
-	data->accel_y = (int16_t)(sensor_value_to_double(&accel[1]) * 100);
-	data->accel_z = (int16_t)(sensor_value_to_double(&accel[2]) * 100);
-	data->gyro_x = (int16_t)(sensor_value_to_double(&gyro[0]) * 100);
-	data->gyro_y = (int16_t)(sensor_value_to_double(&gyro[1]) * 100);
-	data->gyro_z = (int16_t)(sensor_value_to_double(&gyro[2]) * 100);
+	data->accel_x = (float)sensor_value_to_double(&accel[0]);
+	data->accel_y = (float)sensor_value_to_double(&accel[1]);
+	data->accel_z = (float)sensor_value_to_double(&accel[2]);
+	data->gyro_x = (float)sensor_value_to_double(&gyro[0]);
+	data->gyro_y = (float)sensor_value_to_double(&gyro[1]);
+	data->gyro_z = (float)sensor_value_to_double(&gyro[2]);
 
 	imu_inst.read_count++;
 
