@@ -39,10 +39,10 @@
 		reg = <0x68>;
 		status = "okay";
 
-		/* Sensor configuration - 200 Hz to match 5ms polling */
-		accel-hz = <200>;
-		accel-fs = <8>;    /* ±16g full scale */
-		gyro-hz = <200>;
-		gyro-fs = <1000>;   /* ±2000 dps full scale */
+		/* Sensor configuration */
+		accel-hz = <100>;
+		accel-fs = <16>;    /* ±16g full scale */
+		gyro-hz = <100>;
+		gyro-fs = <2000>;   /* ±2000 dps full scale */
 	};
 };
