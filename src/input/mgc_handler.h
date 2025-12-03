@@ -28,6 +28,11 @@ typedef struct {
 typedef struct {
 	char version_string[MGC3130_FW_VERSION_MAX_LEN];  /* ASCII: "1.0.0;p:HillstarV01;..." */
 	size_t length;
+	/* Parsed fields */
+	char library_version[32];     /* GestIC Library Version */
+	char platform[32];            /* Platform */
+	char colibri_version[32];     /* Colibri Suite Version (DSP) */
+	char build_time[32];          /* Build Time */
 } mgc3130_fw_version_t;
 
 /* Driver API */

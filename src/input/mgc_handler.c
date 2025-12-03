@@ -176,6 +176,86 @@ static int mgc3130_reset(void)
 }
 
 /*
+ * Parse firmware version string to extract individual fields
+ * Format: "1.3.14;p:HillstarV01;x:HTIS_GS;DSP:ID9000r2963;i:B;f:22500;nMsg;s:Rel_1_3;t:2013/11/08 13:03:08;..."
+ */
+static void parse_fw_version_string(mgc3130_fw_version_t *ver)
+{
+	char *str = ver->version_string;
+	char *field_start;
+	char *field_end;
+	size_t field_len;
+
+	/* Initialize all fields to empty strings */
+	ver->library_version[0] = '\0';
+	ver->platform[0] = '\0';
+	ver->colibri_version[0] = '\0';
+	ver->build_time[0] = '\0';
+
+	/* Extract GestIC Library Version (everything before first semicolon) */
+	field_end = strchr(str, ';');
+	if (field_end != NULL) {
+		field_len = field_end - str;
+		if (field_len < sizeof(ver->library_version)) {
+			memcpy(ver->library_version, str, field_len);
+			ver->library_version[field_len] = '\0';
+		}
+	} else {
+		/* No semicolon found, use entire string */
+		strncpy(ver->library_version, str, sizeof(ver->library_version) - 1);
+		return;
+	}
+
+	/* Extract Platform (p:) */
+	field_start = strstr(str, "p:");
+	if (field_start != NULL) {
+		field_start += 2;  /* Skip "p:" */
+		field_end = strchr(field_start, ';');
+		if (field_end != NULL) {
+			field_len = field_end - field_start;
+		} else {
+			field_len = strlen(field_start);
+		}
+		if (field_len < sizeof(ver->platform)) {
+			memcpy(ver->platform, field_start, field_len);
+			ver->platform[field_len] = '\0';
+		}
+	}
+
+	/* Extract Colibri Suite Version (DSP:) */
+	field_start = strstr(str, "DSP:");
+	if (field_start != NULL) {
+		field_start += 4;  /* Skip "DSP:" */
+		field_end = strchr(field_start, ';');
+		if (field_end != NULL) {
+			field_len = field_end - field_start;
+		} else {
+			field_len = strlen(field_start);
+		}
+		if (field_len < sizeof(ver->colibri_version)) {
+			memcpy(ver->colibri_version, field_start, field_len);
+			ver->colibri_version[field_len] = '\0';
+		}
+	}
+
+	/* Extract Build Time (t:) */
+	field_start = strstr(str, "t:");
+	if (field_start != NULL) {
+		field_start += 2;  /* Skip "t:" */
+		field_end = strchr(field_start, ';');
+		if (field_end != NULL) {
+			field_len = field_end - field_start;
+		} else {
+			field_len = strlen(field_start);
+		}
+		if (field_len < sizeof(ver->build_time)) {
+			memcpy(ver->build_time, field_start, field_len);
+			ver->build_time[field_len] = '\0';
+		}
+	}
+}
+
+/*
  * Get firmware version from MGC3130
  * The device sends FW_Version_Info automatically at startup,
  * or we can request it using Request_Message
@@ -257,7 +337,15 @@ static int mgc3130_get_fw_version(mgc3130_fw_version_t *ver)
 	ver->version_string[payload_len] = '\0';  /* Null-terminate */
 	ver->length = payload_len;
 
-	LOG_INF("FW Version: %s", ver->version_string);
+	/* Parse the version string into structured fields */
+	parse_fw_version_string(ver);
+
+	LOG_INF("GestIC Library Version: %s", ver->library_version);
+	LOG_INF("Platform: %s", ver->platform);
+	LOG_INF("Colibri Suite Version: %s", ver->colibri_version);
+	if (ver->build_time[0] != '\0') {
+		LOG_INF("Build Time: %s", ver->build_time);
+	}
 
 	/* Read System_Status message if present */
 	ret = wait_for_ts_ready(100);  /* Short timeout */
