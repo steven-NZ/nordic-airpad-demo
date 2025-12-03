@@ -7,6 +7,7 @@
 #include "central_thread.h"
 #include "comm/esb_handler.h"
 #include "input/btn_handler.h"
+#include "input/mgc_handler.h"
 #include "sensors/imu_handler.h"
 #include "sensors/imu_fusion.h"
 #include "sensors/imu_math.h"
@@ -23,6 +24,7 @@ LOG_MODULE_REGISTER(central_thread, LOG_LEVEL_INF);
 /* Driver file descriptors */
 static driver_fd_t imu_fd = DRIVER_FD_INVALID;
 static driver_fd_t btn_fd = DRIVER_FD_INVALID;
+static driver_fd_t mgc_fd = DRIVER_FD_INVALID;
 static driver_fd_t esb_fd = DRIVER_FD_INVALID;
 
 /* IMU fusion state */
@@ -54,9 +56,28 @@ static void central_thread_entry(void *p1, void *p2, void *p3)
 	}
 	LOG_INF("Button driver opened with fd=%d", btn_fd);
 
+	mgc_fd = mgc_open();
+	if (mgc_fd < 0) {
+		LOG_ERR("Failed to open MGC handler: %d", mgc_fd);
+		btn_close(btn_fd);
+		imu_close(imu_fd);
+		return;
+	}
+	LOG_INF("MGC handler opened with fd=%d", mgc_fd);
+
+	// /* Read MGC3130 firmware version */
+	// mgc3130_fw_version_t mgc_fw_ver;
+	// result = mgc_ioctl(mgc_fd, MGC_IOCTL_GET_FW_VERSION, &mgc_fw_ver);
+	// if (result == 0) {
+	// 	LOG_INF("MGC3130 FW Version: %s", mgc_fw_ver.version_string);
+	// } else {
+	// 	LOG_WRN("Failed to read MGC3130 FW version: %d", (int)result);
+	// }
+
 	esb_fd = esb_open(0);
 	if (esb_fd < 0) {
 		LOG_ERR("Failed to open ESB driver: %d", esb_fd);
+		mgc_close(mgc_fd);
 		btn_close(btn_fd);
 		imu_close(imu_fd);
 		return;
@@ -75,6 +96,7 @@ static void central_thread_entry(void *p1, void *p2, void *p3)
 	if (!fusion_state) {
 		LOG_ERR("Failed to initialize IMU fusion");
 		esb_close(esb_fd);
+		mgc_close(mgc_fd);
 		btn_close(btn_fd);
 		imu_close(imu_fd);
 		return;
@@ -182,6 +204,7 @@ static void central_thread_entry(void *p1, void *p2, void *p3)
 		imu_fusion_destroy(fusion_state);
 	}
 	esb_close(esb_fd);
+	mgc_close(mgc_fd);
 	btn_close(btn_fd);
 	imu_close(imu_fd);
 }

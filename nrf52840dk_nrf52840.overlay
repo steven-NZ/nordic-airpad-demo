@@ -22,6 +22,24 @@
 			bias-pull-up;
 		};
 	};
+
+	/* I2C1 Pin Configuration for MGC3130 */
+	i2c1_default: i2c1_default {
+		group1 {
+			psels = <NRF_PSEL(TWIM_SDA, 0, 30)>,
+			        <NRF_PSEL(TWIM_SCL, 0, 31)>;
+			bias-pull-up;
+		};
+	};
+
+	i2c1_sleep: i2c1_sleep {
+		group1 {
+			psels = <NRF_PSEL(TWIM_SDA, 0, 30)>,
+			        <NRF_PSEL(TWIM_SCL, 0, 31)>;
+			low-power-enable;
+			bias-pull-up;
+		};
+	};
 };
 
 /* I2C Bus Configuration */
@@ -45,4 +63,14 @@
 		gyro-hz = <100>;
 		gyro-fs = <2000>;   /* ±2000 dps full scale */
 	};
+};
+
+/* I2C1 Bus Configuration for MGC3130 */
+&i2c1 {
+	compatible = "nordic,nrf-twim";
+	status = "okay";
+	pinctrl-0 = <&i2c1_default>;
+	pinctrl-1 = <&i2c1_sleep>;
+	pinctrl-names = "default", "sleep";
+	clock-frequency = <I2C_BITRATE_STANDARD>;  /* 100 kHz */
 };
