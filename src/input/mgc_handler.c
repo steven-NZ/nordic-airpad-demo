@@ -37,6 +37,9 @@ typedef struct {
 	const struct device *gpio_dev;
 	mgc3130_fw_version_t fw_version;
 	bool fw_version_valid;
+	mgc3130_config_t config;           /* Configuration state */
+	mgc3130_touch_state_t touch_state; /* Touch tracking state */
+	bool configured;                    /* Runtime parameters configured */
 } mgc_handler_instance_t;
 
 static mgc_handler_instance_t mgc_inst = {
@@ -173,6 +176,244 @@ static int mgc3130_reset(void)
 	LOG_INF("MGC3130 reset complete");
 
 	return 0;
+}
+
+/*
+ * Set a runtime parameter on the MGC3130
+ *
+ * @param param_id: Runtime parameter ID (e.g., 0x0097)
+ * @param arg0: Argument 0
+ * @param arg1: Argument 1
+ * @return: 0 on success, negative error code on failure
+ */
+static int mgc3130_set_runtime_parameter(uint16_t param_id, uint32_t arg0, uint32_t arg1)
+{
+	uint8_t buf[MGC3130_MSG_BUF_SIZE];
+	mgc3130_set_runtime_param_msg_t msg;
+	mgc3130_system_status_msg_t *status;
+	int ret;
+	uint16_t msg_size;
+	uint8_t msg_id;
+
+	/* Build SET_RUNTIME_PARAMETER message */
+	msg.header.size = sizeof(mgc3130_set_runtime_param_msg_t);
+	msg.header.flags = 0;
+	msg.header.seq = 0;
+	msg.header.id = MGC3130_MSG_SET_RUNTIME_PARAMETER;
+	msg.param_id = param_id;
+	msg.reserved = 0;
+	msg.arg0 = arg0;
+	msg.arg1 = arg1;
+
+	LOG_DBG("Setting runtime param 0x%04X: arg0=0x%08X, arg1=0x%08X",
+	        param_id, arg0, arg1);
+
+	/* Send message */
+	ret = mgc3130_write_message((uint8_t *)&msg, sizeof(msg));
+	if (ret < 0) {
+		LOG_ERR("Failed to write SET_RUNTIME_PARAMETER");
+		return ret;
+	}
+
+	/* Wait for System_Status response */
+	ret = mgc3130_read_message(buf, sizeof(buf));
+	if (ret < 0) {
+		LOG_ERR("Failed to read System_Status response");
+		return ret;
+	}
+
+	msg_size = buf[0] | (buf[1] << 8);
+	msg_id = buf[3];
+
+	/* Validate response is System_Status */
+	if (msg_id != MGC3130_MSG_SYSTEM_STATUS) {
+		LOG_ERR("Unexpected response ID: 0x%02X (expected 0x15)", msg_id);
+		return -EINVAL;
+	}
+
+	/* Parse System_Status */
+	status = (mgc3130_system_status_msg_t *)buf;
+
+	if (status->error_code != 0) {
+		LOG_ERR("Parameter set failed with error code: 0x%02X", status->error_code);
+		return -EIO;
+	}
+
+	LOG_DBG("Runtime parameter 0x%04X set successfully", param_id);
+	return 0;
+}
+
+/*
+ * Configure MGC3130 for touch detection
+ * Enables touch detection and TouchInfo output
+ *
+ * @return: 0 on success, negative error code on failure
+ */
+static int mgc3130_configure_touch(void)
+{
+	int ret;
+
+	LOG_INF("Configuring MGC3130 for touch detection...");
+
+	/* Step 1: Enable touch detection (dspTouchConfig = 0x0097) */
+	ret = mgc3130_set_runtime_parameter(
+		MGC3130_PARAM_DSP_TOUCH_CONFIG,
+		0x08,        /* arg0: 0x08 = enable touch */
+		0x08         /* arg1: 0x08 = required value */
+	);
+	if (ret < 0) {
+		LOG_ERR("Failed to enable touch detection: %d", ret);
+		return ret;
+	}
+
+	/* Step 2: Enable TouchInfo in data output (DataOutputEnableMask = 0x00A0) */
+	ret = mgc3130_set_runtime_parameter(
+		MGC3130_PARAM_DATA_OUTPUT_ENABLE,
+		MGC3130_OUTPUT_TOUCH_INFO,  /* arg0: 0x00000002 = TouchInfo field */
+		0xFFFFFFFF                   /* arg1: 0xFFFFFFFF = overwrite mask */
+	);
+	if (ret < 0) {
+		LOG_ERR("Failed to enable TouchInfo output: %d", ret);
+		return ret;
+	}
+
+	/* Update configuration state */
+	mgc_inst.config.touch_enabled = true;
+	mgc_inst.config.output_mask = MGC3130_OUTPUT_TOUCH_INFO;
+	mgc_inst.configured = true;
+
+	/* Initialize touch state */
+	mgc_inst.touch_state.current_touch = 0;
+	mgc_inst.touch_state.previous_touch = 0;
+	mgc_inst.touch_state.touch_active = false;
+	mgc_inst.touch_state.touch_start_time = 0;
+
+	LOG_INF("MGC3130 touch detection configured successfully");
+	return 0;
+}
+
+/*
+ * Read and parse Sensor_Data_Output message
+ *
+ * @param touch_info: Output pointer for touch information (can be NULL)
+ * @return: 0 on success, negative error code on failure
+ */
+static int mgc3130_read_sensor_data(mgc3130_touch_info_t *touch_info)
+{
+	uint8_t buf[MGC3130_MSG_BUF_SIZE];
+	int ret;
+	uint16_t msg_size;
+	uint8_t msg_id;
+	uint16_t config_mask;
+	size_t offset;
+
+	/* Read message from sensor */
+	ret = mgc3130_read_message(buf, sizeof(buf));
+	if (ret < 0) {
+		return ret;
+	}
+
+	msg_size = buf[0] | (buf[1] << 8);
+	msg_id = buf[3];
+
+	/* Validate message ID */
+	if (msg_id != MGC3130_MSG_SENSOR_DATA_OUTPUT) {
+		LOG_WRN("Unexpected message ID: 0x%02X (expected 0x91)", msg_id);
+		return -EINVAL;
+	}
+
+	/* Parse fixed header: size(2) + flags(1) + id(1) = 4 bytes minimum */
+	offset = 4;
+
+	/* Parse config mask (2 bytes) */
+	if (offset + 2 > msg_size) {
+		LOG_ERR("Message too short for config mask");
+		return -EINVAL;
+	}
+	config_mask = buf[offset] | (buf[offset + 1] << 8);
+	offset += 2;
+
+	/* Skip timestamp (1 byte) and system_info (1 byte) */
+	offset += 2;
+
+	/* Parse variable fields based on config_mask */
+
+	/* TouchInfo field (4 bytes) - bit 2 */
+	if ((config_mask & MGC3130_OUTPUT_TOUCH_INFO) && touch_info != NULL) {
+		if (offset + 4 > msg_size) {
+			LOG_ERR("Message too short for TouchInfo field");
+			return -EINVAL;
+		}
+
+		touch_info->touch_flags = buf[offset] | (buf[offset + 1] << 8);
+		touch_info->touch_counter = buf[offset + 2];
+		touch_info->reserved = buf[offset + 3];
+		offset += 4;
+	}
+
+	LOG_DBG("Sensor data parsed: config_mask=0x%04X, size=%u", config_mask, msg_size);
+	return 0;
+}
+
+/*
+ * Process touch state transitions and log touch cycles
+ * Detects and logs when touch starts (any electrode touched) and
+ * when touch ends (all electrodes released)
+ *
+ * @param touch_info: Current touch information from sensor
+ */
+static void mgc3130_process_touch_state(const mgc3130_touch_info_t *touch_info)
+{
+	uint8_t touch_electrodes;
+	uint32_t current_time;
+	uint32_t touch_duration;
+
+	/* Extract electrode touch bits (bits 0-3: S, W, N, E) */
+	touch_electrodes = touch_info->touch_flags & 0x0F;
+
+	/* Update current touch state */
+	mgc_inst.touch_state.previous_touch = mgc_inst.touch_state.current_touch;
+	mgc_inst.touch_state.current_touch = touch_electrodes;
+	current_time = k_uptime_get_32();
+
+	/* Detect touch cycle START: transition from no-touch to any-touch */
+	if (!mgc_inst.touch_state.touch_active && touch_electrodes != 0) {
+		/* Touch started */
+		mgc_inst.touch_state.touch_active = true;
+		mgc_inst.touch_state.touch_start_time = current_time;
+
+		/* Log which electrodes are touched */
+		LOG_INF("Touch START - Electrodes: %s%s%s%s (counter=%u)",
+		        (touch_electrodes & MGC3130_TOUCH_SOUTH) ? "S" : "",
+		        (touch_electrodes & MGC3130_TOUCH_WEST)  ? "W" : "",
+		        (touch_electrodes & MGC3130_TOUCH_NORTH) ? "N" : "",
+		        (touch_electrodes & MGC3130_TOUCH_EAST)  ? "E" : "",
+		        touch_info->touch_counter);
+	}
+	/* Detect touch cycle END: transition from any-touch to no-touch */
+	else if (mgc_inst.touch_state.touch_active && touch_electrodes == 0) {
+		/* Touch ended */
+		touch_duration = current_time - mgc_inst.touch_state.touch_start_time;
+		mgc_inst.touch_state.touch_active = false;
+
+		/* Log end of touch with duration */
+		LOG_INF("Touch END - Duration: %u ms, Last electrodes: %s%s%s%s",
+		        touch_duration,
+		        (mgc_inst.touch_state.previous_touch & MGC3130_TOUCH_SOUTH) ? "S" : "",
+		        (mgc_inst.touch_state.previous_touch & MGC3130_TOUCH_WEST)  ? "W" : "",
+		        (mgc_inst.touch_state.previous_touch & MGC3130_TOUCH_NORTH) ? "N" : "",
+		        (mgc_inst.touch_state.previous_touch & MGC3130_TOUCH_EAST)  ? "E" : "");
+	}
+	/* Touch ongoing - detect electrode changes */
+	else if (mgc_inst.touch_state.touch_active &&
+	         touch_electrodes != mgc_inst.touch_state.previous_touch) {
+		/* Electrode configuration changed during touch */
+		LOG_DBG("Touch change - Electrodes: %s%s%s%s",
+		        (touch_electrodes & MGC3130_TOUCH_SOUTH) ? "S" : "",
+		        (touch_electrodes & MGC3130_TOUCH_WEST)  ? "W" : "",
+		        (touch_electrodes & MGC3130_TOUCH_NORTH) ? "N" : "",
+		        (touch_electrodes & MGC3130_TOUCH_EAST)  ? "E" : "");
+	}
 }
 
 /*
@@ -408,24 +649,49 @@ int mgc_close(driver_fd_t fd)
 ssize_t mgc_read(driver_fd_t fd, void *buf, size_t count)
 {
 	int ret;
+	int ts_value;
+	mgc3130_touch_info_t touch_info;
 
 	if (mgc_inst.base.state != DRIVER_STATE_OPEN) {
 		LOG_ERR("Driver not open");
 		return -EINVAL;
 	}
 
-	if (buf == NULL || count == 0) {
-		return -EINVAL;
-	}
-
 	DRIVER_LOCK(&mgc_inst.base);
 
-	/* Read raw message from MGC3130 */
-	ret = mgc3130_read_message((uint8_t *)buf, count);
+	/* Non-blocking check: Read TS pin */
+	ts_value = gpio_pin_get(mgc_inst.gpio_dev, MGC3130_TS_PIN);
+	if (ts_value < 0) {
+		LOG_ERR("Failed to read TS pin: %d", ts_value);
+		DRIVER_UNLOCK(&mgc_inst.base);
+		return ts_value;
+	}
+
+	/* If TS is high - no data available */
+	if (ts_value != 0) {
+		DRIVER_UNLOCK(&mgc_inst.base);
+		return DRIVER_ERR_AGAIN;
+	}
+
+	/* TS is low - data ready, read sensor data */
+	ret = mgc3130_read_sensor_data(&touch_info);
+	if (ret < 0) {
+		LOG_WRN("Failed to read sensor data: %d", ret);
+		DRIVER_UNLOCK(&mgc_inst.base);
+		return ret;
+	}
+
+	/* Process touch state transitions and log */
+	mgc3130_process_touch_state(&touch_info);
+
+	/* Copy touch_info to user buffer if provided */
+	if (buf != NULL && count >= sizeof(mgc3130_touch_info_t)) {
+		memcpy(buf, &touch_info, sizeof(mgc3130_touch_info_t));
+	}
 
 	DRIVER_UNLOCK(&mgc_inst.base);
 
-	return ret;
+	return sizeof(mgc3130_touch_info_t);
 }
 
 int mgc_ioctl(driver_fd_t fd, unsigned int cmd, void *arg)
@@ -458,6 +724,20 @@ int mgc_ioctl(driver_fd_t fd, unsigned int cmd, void *arg)
 				mgc_inst.fw_version_valid = true;
 			}
 		}
+		break;
+
+	case MGC_IOCTL_CONFIGURE_TOUCH:
+		/* Manually trigger touch configuration */
+		ret = mgc3130_configure_touch();
+		break;
+
+	case MGC_IOCTL_READ_SENSOR_DATA:
+		/* Single sensor data read */
+		if (arg == NULL) {
+			ret = -EINVAL;
+			break;
+		}
+		ret = mgc3130_read_sensor_data((mgc3130_touch_info_t *)arg);
 		break;
 
 	default:
@@ -531,6 +811,16 @@ static int mgc_init(void)
 	} else {
 		LOG_WRN("Could not read initial FW version (will retry on first ioctl)");
 		/* Don't fail initialization - we can retry later */
+	}
+
+	/* Configure touch detection */
+	ret = mgc3130_configure_touch();
+	if (ret < 0) {
+		LOG_ERR("Failed to configure touch detection: %d", ret);
+		mgc_inst.configured = false;
+		/* Don't fail initialization - allow manual configuration via ioctl */
+	} else {
+		mgc_inst.configured = true;
 	}
 
 	/* State remains DRIVER_STATE_CLOSED - application must call open() */

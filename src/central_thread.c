@@ -159,6 +159,14 @@ static void central_thread_entry(void *p1, void *p2, void *p3)
 			btn_state_raw = 0;
 		}
 
+		/* Poll MGC3130 touch sensor data */
+		mgc3130_touch_info_t touch_info;
+		result = mgc_read(mgc_fd, &touch_info, sizeof(touch_info));
+		if (result < 0 && result != DRIVER_ERR_AGAIN) {
+			LOG_WRN("MGC read failed: %d", (int)result);
+		}
+		/* Touch processing happens inside mgc_read() via state machine */
+
 		/* Build sensor data packet with quaternion */
 		sensor_packet.btn_state = btn_state_raw;
 
