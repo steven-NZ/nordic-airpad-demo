@@ -376,43 +376,16 @@ static void mgc3130_process_touch_state(const mgc3130_touch_info_t *touch_info)
 	mgc_inst.touch_state.current_touch = touch_electrodes;
 	current_time = k_uptime_get_32();
 
-	/* Detect touch cycle START: transition from no-touch to any-touch */
-	if (!mgc_inst.touch_state.touch_active && touch_electrodes != 0) {
-		/* Touch started */
-		mgc_inst.touch_state.touch_active = true;
-		mgc_inst.touch_state.touch_start_time = current_time;
+	/* Detect individual electrode changes and log current state */
+	uint8_t changed_electrodes = touch_electrodes ^ mgc_inst.touch_state.previous_touch;
 
-		/* Log which electrodes are touched */
-		LOG_INF("Touch START - Electrodes: %s%s%s%s (counter=%u)",
-		        (touch_electrodes & MGC3130_TOUCH_SOUTH) ? "S" : "",
-		        (touch_electrodes & MGC3130_TOUCH_WEST)  ? "W" : "",
-		        (touch_electrodes & MGC3130_TOUCH_NORTH) ? "N" : "",
-		        (touch_electrodes & MGC3130_TOUCH_EAST)  ? "E" : "",
-		        touch_info->touch_counter);
-	}
-	/* Detect touch cycle END: transition from any-touch to no-touch */
-	else if (mgc_inst.touch_state.touch_active && touch_electrodes == 0) {
-		/* Touch ended */
-		touch_duration = current_time - mgc_inst.touch_state.touch_start_time;
-		mgc_inst.touch_state.touch_active = false;
-
-		/* Log end of touch with duration */
-		LOG_INF("Touch END - Duration: %u ms, Last electrodes: %s%s%s%s",
-		        touch_duration,
-		        (mgc_inst.touch_state.previous_touch & MGC3130_TOUCH_SOUTH) ? "S" : "",
-		        (mgc_inst.touch_state.previous_touch & MGC3130_TOUCH_WEST)  ? "W" : "",
-		        (mgc_inst.touch_state.previous_touch & MGC3130_TOUCH_NORTH) ? "N" : "",
-		        (mgc_inst.touch_state.previous_touch & MGC3130_TOUCH_EAST)  ? "E" : "");
-	}
-	/* Touch ongoing - detect electrode changes */
-	else if (mgc_inst.touch_state.touch_active &&
-	         touch_electrodes != mgc_inst.touch_state.previous_touch) {
-		/* Electrode configuration changed during touch */
-		LOG_DBG("Touch change - Electrodes: %s%s%s%s",
-		        (touch_electrodes & MGC3130_TOUCH_SOUTH) ? "S" : "",
-		        (touch_electrodes & MGC3130_TOUCH_WEST)  ? "W" : "",
-		        (touch_electrodes & MGC3130_TOUCH_NORTH) ? "N" : "",
-		        (touch_electrodes & MGC3130_TOUCH_EAST)  ? "E" : "");
+	if (changed_electrodes != 0) {
+		/* At least one electrode changed state - log current state of all electrodes */
+		LOG_INF("North: %u East: %u South: %u West: %u",
+		        (touch_electrodes & MGC3130_TOUCH_NORTH) ? 1 : 0,
+		        (touch_electrodes & MGC3130_TOUCH_EAST)  ? 1 : 0,
+		        (touch_electrodes & MGC3130_TOUCH_SOUTH) ? 1 : 0,
+		        (touch_electrodes & MGC3130_TOUCH_WEST)  ? 1 : 0);
 	}
 }
 

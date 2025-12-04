@@ -135,7 +135,7 @@ static void central_thread_entry(void *p1, void *p2, void *p3)
 			if (ret == 0 && fusion_output.valid) {
 				/* Log every 10th sample (10Hz) to reduce verbosity */
 				static uint32_t log_counter = 0;
-				if (++log_counter >= 10) {
+				if (++log_counter >= 1000) {
 					log_counter = 0;
 					LOG_INF("Quat[w:%.3f x:%.3f y:%.3f z:%.3f] "
 					        "Euler[R:%.1f° P:%.1f° Y:%.1f°]",
