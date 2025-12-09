@@ -132,6 +132,9 @@ static int mgc3130_write_message(const uint8_t *buf, size_t len)
 {
 	int ret;
 
+	/* Log what we're sending */
+	LOG_HEXDUMP_INF(buf, len, "MGC I2C WRITE:");
+
 	/* Write message via I2C */
 	ret = i2c_write(mgc_inst.i2c_dev, buf, len, MGC3130_I2C_ADDR);
 	if (ret < 0) {
@@ -142,10 +145,7 @@ static int mgc3130_write_message(const uint8_t *buf, size_t len)
 	/* Mandatory 200μs wait after transfer */
 	k_usleep(MGC3130_POST_TRANSFER_DELAY_US);
 
-	LOG_ERR("Write message: len=%u", len);
-	// LOG_WRN("Raw System_Status: [0]=%02X [1]=%02X [2]=%02X [3]=%02X [4]=%02X [5]=%02X [6]=%02X [7]=%02X [8]=%02X [9]=%02X [10]=%02X [11]=%02X [12]=%02X [13]=%02X [14]=%02X [15]=%02X",
-	//         buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7], buf[8], buf[9], buf[10], buf[11], buf[12], buf[13], buf[14], buf[15]);
-
+	LOG_INF("Write message: len=%u, ret=%d", len, ret);
 	return 0;
 }
 
@@ -228,6 +228,10 @@ static int mgc3130_set_runtime_parameter(uint16_t param_id, uint32_t arg0, uint3
 
 	msg_size = buf[0];
 	msg_id = buf[3];
+
+	/* Log full message in hex for debugging */
+	LOG_HEXDUMP_INF(buf, (msg_size > 0 && msg_size < sizeof(buf)) ? msg_size : 32,
+	                "SET_RUNTIME_PARAM response:");
 
 	/* Validate response is System_Status */
 	if (msg_id != MGC3130_MSG_SYSTEM_STATUS) {
@@ -669,6 +673,10 @@ static int mgc3130_get_fw_version(mgc3130_fw_version_t *ver)
 	msg_size = buf[0];
 	msg_id = buf[3];
 
+	/* Log full message in hex for debugging */
+	LOG_HEXDUMP_INF(buf, (msg_size > 0 && msg_size < sizeof(buf)) ? msg_size : 32,
+	                "FW_VERSION response:");
+
 	/* Validate message ID */
 	if (msg_id != MGC3130_MSG_FW_VERSION_INFO) {
 		LOG_ERR("Unexpected message ID: 0x%02X (expected 0x83)", msg_id);
@@ -942,13 +950,67 @@ static int mgc_init(void)
 	}
 
 	/* Try to read firmware version */
+	LOG_INF("=== FIRST firmware version request ===");
 	ret = mgc3130_get_fw_version(&mgc_inst.fw_version);
 	if (ret == 0) {
 		mgc_inst.fw_version_valid = true;
+		LOG_INF("=== FIRST firmware version request completed ===");
 		LOG_INF("Initial FW version read successful");
 	} else {
 		LOG_WRN("Could not read initial FW version (will retry on first ioctl)");
 		/* Don't fail initialization - we can retry later */
+	}
+
+	/* Second firmware version request test - verify multiple I2C writes work */
+	static mgc3130_fw_version_t fw_version_test2;
+	LOG_INF("=== SECOND firmware version request (I2C write test) ===");
+
+	ret = mgc3130_get_fw_version(&fw_version_test2);
+	if (ret == 0) {
+		LOG_INF("=== SECOND firmware version request completed ===");
+		LOG_INF("Second FW: Library=%s, Platform=%s, Colibri=%s",
+		        fw_version_test2.library_version,
+		        fw_version_test2.platform,
+		        fw_version_test2.colibri_version);
+
+		/* Compare first and second versions */
+		if (strcmp(mgc_inst.fw_version.version_string,
+		           fw_version_test2.version_string) == 0) {
+			LOG_INF("Version comparison: MATCH - I2C reads consistent");
+		} else {
+			LOG_WRN("Version comparison: MISMATCH - I2C consistency issue!");
+			LOG_WRN("First:  %s", mgc_inst.fw_version.version_string);
+			LOG_WRN("Second: %s", fw_version_test2.version_string);
+		}
+	} else {
+		LOG_ERR("Second firmware version request failed: %d", ret);
+		/* Don't fail initialization - this is just a test */
+	}
+
+	/* Check system status after firmware requests */
+	LOG_INF("Checking system status after firmware version requests...");
+	static uint8_t buf[MGC3130_MSG_BUF_SIZE];
+	ret = wait_for_ts_ready(100);  /* Short timeout */
+	if (ret == 0) {
+		ret = mgc3130_read_message(buf, sizeof(buf));
+		if (ret > 0) {
+			uint8_t msg_id = buf[3];
+			if (msg_id == MGC3130_MSG_SYSTEM_STATUS) {
+				mgc3130_system_status_msg_t *status =
+					(mgc3130_system_status_msg_t *)buf;
+				LOG_INF("System Status: msg_id=0x%02X, error_code=0x%04X",
+				        status->msg_id, status->error_code);
+
+				if (status->error_code != 0) {
+					LOG_WRN("System status indicates error: 0x%04X",
+					        status->error_code);
+				} else {
+					LOG_INF("System status: OK");
+				}
+			}
+		}
+	} else {
+		LOG_DBG("No System_Status message available (normal)");
 	}
 
 	/* Configure touch detection */
