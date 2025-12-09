@@ -22,11 +22,11 @@ LOG_MODULE_REGISTER(mgc_handler, LOG_LEVEL_INF);
 #define MGC3130_TS_PIN    29  /* Transfer Status pin */
 
 /* Timing Constants */
-#define MGC3130_RESET_DELAY_MS        	10
-#define MGC3130_BOOT_DELAY_MS         	100
-#define MGC3130_POST_TRANSFER_DELAY_US 	200
-#define MGC3130_TS_TIMEOUT_MS         	500
-#define MGC3130_PARAM_PROCESSING_DELAY_MS  10
+#define MGC3130_RESET_DELAY_MS          5   /* Reset pulse width */
+#define MGC3130_BOOT_DELAY_MS           5  /* Boot time after reset */
+#define MGC3130_POST_TRANSFER_DELAY_US  200  /* I2C bus timing (per datasheet) */
+#define MGC3130_TS_TIMEOUT_MS           1  /* TS line poll timeout */
+#define MGC3130_INTER_COMMAND_DELAY_MS  1   /* Delay between I2C operations for device processing */
 
 /* Message Buffer Size */
 #define MGC3130_MSG_BUF_SIZE  256
@@ -54,7 +54,7 @@ static mgc_handler_instance_t mgc_inst = {
 
 /* Request Message to request Fw_Version_Info */
 static const uint8_t request_fw_version[] = {
-	0x0C, 0x00,  /* Size: 12 bytes (little-endian) */
+	0x0C,  /* Size: 12 bytes (little-endian) */
 	0x00,        /* Flags */
 	0x06,        /* ID: Request_Message */
 	0x83,        /* Payload: request FW_Version_Info (0x83) */
@@ -119,6 +119,9 @@ static int mgc3130_read_message(uint8_t *buf, size_t max_len)
 	/* Mandatory 200μs wait after transfer */
 	k_usleep(MGC3130_POST_TRANSFER_DELAY_US);
 
+	/* Inter-command delay to allow device to process */
+	k_msleep(MGC3130_INTER_COMMAND_DELAY_MS);
+
 	LOG_DBG("Read message: size=%u, ID=0x%02X", msg_size, buf[3]);
 
 	return msg_size;
@@ -132,8 +135,25 @@ static int mgc3130_write_message(const uint8_t *buf, size_t len)
 {
 	int ret;
 
-	/* Log what we're sending */
-	LOG_HEXDUMP_INF(buf, len, "MGC I2C WRITE:");
+	/* Check TS line and clear any pending data before write */
+	ret = gpio_pin_get(mgc_inst.gpio_dev, MGC3130_TS_PIN);
+	if (ret < 0) {
+		LOG_ERR("Failed to read TS pin: %d", ret);
+		return ret;
+	}
+
+	/* If TS is low (device has pending data), read and discard it */
+	if (ret == 0) {
+		uint8_t discard_buf[256];
+		LOG_DBG("TS low before write, clearing pending data");
+		ret = i2c_read(mgc_inst.i2c_dev, discard_buf, sizeof(discard_buf), MGC3130_I2C_ADDR);
+		if (ret == 0) {
+			k_usleep(MGC3130_POST_TRANSFER_DELAY_US);
+		}
+	}
+
+	/* Inter-command delay before write */
+	k_msleep(MGC3130_INTER_COMMAND_DELAY_MS);
 
 	/* Write message via I2C */
 	ret = i2c_write(mgc_inst.i2c_dev, buf, len, MGC3130_I2C_ADDR);
@@ -142,7 +162,7 @@ static int mgc3130_write_message(const uint8_t *buf, size_t len)
 		return ret;
 	}
 
-	/* Mandatory 200μs wait after transfer */
+	/* Mandatory 200μs wait after transfer (per datasheet) */
 	k_usleep(MGC3130_POST_TRANSFER_DELAY_US);
 
 	LOG_INF("Write message: len=%u, ret=%d", len, ret);
@@ -229,19 +249,11 @@ static int mgc3130_set_runtime_parameter(uint16_t param_id, uint32_t arg0, uint3
 	msg_size = buf[0];
 	msg_id = buf[3];
 
-	/* Log full message in hex for debugging */
-	LOG_HEXDUMP_INF(buf, (msg_size > 0 && msg_size < sizeof(buf)) ? msg_size : 32,
-	                "SET_RUNTIME_PARAM response:");
-
 	/* Validate response is System_Status */
 	if (msg_id != MGC3130_MSG_SYSTEM_STATUS) {
 		LOG_ERR("Unexpected response ID: 0x%02X (expected 0x15)", msg_id);
 		return -EINVAL;
 	}
-
-	// /* Log raw System_Status bytes for analysis */
-	// LOG_WRN("Raw System_Status: [0]=%02X [1]=%02X [2]=%02X [3]=%02X [4]=%02X [5]=%02X [6]=%02X [7]=%02X",
-	//         buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7]);
 
 	/* Parse System_Status */
 	status = (mgc3130_system_status_msg_t *)buf;
@@ -644,6 +656,7 @@ static int mgc3130_get_fw_version(mgc3130_fw_version_t *ver)
 	size_t payload_len;
 
 	/* Wait for automatic FW_Version_Info message after reset */
+	bool automatic_fw = false;
 	ret = wait_for_ts_ready(MGC3130_TS_TIMEOUT_MS);
 	if (ret < 0) {
 		LOG_INF("No automatic FW version, sending request...");
@@ -661,6 +674,8 @@ static int mgc3130_get_fw_version(mgc3130_fw_version_t *ver)
 			LOG_ERR("No response to request message");
 			return ret;
 		}
+	} else {
+		automatic_fw = true;
 	}
 
 	/* Read FW_Version_Info message */
@@ -672,10 +687,6 @@ static int mgc3130_get_fw_version(mgc3130_fw_version_t *ver)
 
 	msg_size = buf[0];
 	msg_id = buf[3];
-
-	/* Log full message in hex for debugging */
-	LOG_HEXDUMP_INF(buf, (msg_size > 0 && msg_size < sizeof(buf)) ? msg_size : 32,
-	                "FW_VERSION response:");
 
 	/* Validate message ID */
 	if (msg_id != MGC3130_MSG_FW_VERSION_INFO) {
@@ -725,14 +736,41 @@ static int mgc3130_get_fw_version(mgc3130_fw_version_t *ver)
 		LOG_INF("Build Time: %s", ver->build_time);
 	}
 
-	/* Read System_Status message if present */
-	ret = wait_for_ts_ready(100);  /* Short timeout */
-	if (ret == 0) {
-		ret = mgc3130_read_message(buf, sizeof(buf));
-		if (ret > 0) {
-			msg_id = buf[3];
-			if (msg_id == MGC3130_MSG_SYSTEM_STATUS) {
-				LOG_INF("Received System_Status message");
+	/* Handle automatic vs requested firmware version differently */
+	if (automatic_fw) {
+		/* Automatic FW version - check for and clear any pending messages */
+		LOG_DBG("Automatic FW version - clearing any pending messages");
+
+		/* Poll for pending messages and read them */
+		for (int i = 0; i < 3; i++) {
+			k_msleep(20);  /* Wait for device to prepare data */
+			ret = gpio_pin_get(mgc_inst.gpio_dev, MGC3130_TS_PIN);
+			if (ret == 0) {
+				/* TS low - data pending, read it */
+				ret = mgc3130_read_message(buf, sizeof(buf));
+				if (ret > 0) {
+					LOG_DBG("Cleared pending message 0x%02X after automatic FW", buf[3]);
+				}
+			} else {
+				/* TS high - no pending data */
+				break;
+			}
+		}
+
+		/* Extra settling time */
+		k_msleep(20);
+	} else {
+		/* Requested FW version - read System_Status response */
+		ret = wait_for_ts_ready(MGC3130_TS_TIMEOUT_MS);
+		if (ret == 0) {
+			ret = mgc3130_read_message(buf, sizeof(buf));
+			if (ret > 0) {
+				msg_id = buf[3];
+				if (msg_id == MGC3130_MSG_SYSTEM_STATUS) {
+					LOG_DBG("Received System_Status after FW request");
+				} else {
+					LOG_WRN("Expected System_Status, got 0x%02X", msg_id);
+				}
 			}
 		}
 	}
@@ -949,68 +987,14 @@ static int mgc_init(void)
 		return ret;
 	}
 
-	/* Try to read firmware version */
-	LOG_INF("=== FIRST firmware version request ===");
+	/* Read firmware version */
 	ret = mgc3130_get_fw_version(&mgc_inst.fw_version);
 	if (ret == 0) {
 		mgc_inst.fw_version_valid = true;
-		LOG_INF("=== FIRST firmware version request completed ===");
-		LOG_INF("Initial FW version read successful");
+		LOG_INF("Firmware version read successful");
 	} else {
-		LOG_WRN("Could not read initial FW version (will retry on first ioctl)");
+		LOG_WRN("Could not read firmware version (will retry on first ioctl)");
 		/* Don't fail initialization - we can retry later */
-	}
-
-	/* Second firmware version request test - verify multiple I2C writes work */
-	static mgc3130_fw_version_t fw_version_test2;
-	LOG_INF("=== SECOND firmware version request (I2C write test) ===");
-
-	ret = mgc3130_get_fw_version(&fw_version_test2);
-	if (ret == 0) {
-		LOG_INF("=== SECOND firmware version request completed ===");
-		LOG_INF("Second FW: Library=%s, Platform=%s, Colibri=%s",
-		        fw_version_test2.library_version,
-		        fw_version_test2.platform,
-		        fw_version_test2.colibri_version);
-
-		/* Compare first and second versions */
-		if (strcmp(mgc_inst.fw_version.version_string,
-		           fw_version_test2.version_string) == 0) {
-			LOG_INF("Version comparison: MATCH - I2C reads consistent");
-		} else {
-			LOG_WRN("Version comparison: MISMATCH - I2C consistency issue!");
-			LOG_WRN("First:  %s", mgc_inst.fw_version.version_string);
-			LOG_WRN("Second: %s", fw_version_test2.version_string);
-		}
-	} else {
-		LOG_ERR("Second firmware version request failed: %d", ret);
-		/* Don't fail initialization - this is just a test */
-	}
-
-	/* Check system status after firmware requests */
-	LOG_INF("Checking system status after firmware version requests...");
-	static uint8_t buf[MGC3130_MSG_BUF_SIZE];
-	ret = wait_for_ts_ready(100);  /* Short timeout */
-	if (ret == 0) {
-		ret = mgc3130_read_message(buf, sizeof(buf));
-		if (ret > 0) {
-			uint8_t msg_id = buf[3];
-			if (msg_id == MGC3130_MSG_SYSTEM_STATUS) {
-				mgc3130_system_status_msg_t *status =
-					(mgc3130_system_status_msg_t *)buf;
-				LOG_INF("System Status: msg_id=0x%02X, error_code=0x%04X",
-				        status->msg_id, status->error_code);
-
-				if (status->error_code != 0) {
-					LOG_WRN("System status indicates error: 0x%04X",
-					        status->error_code);
-				} else {
-					LOG_INF("System status: OK");
-				}
-			}
-		}
-	} else {
-		LOG_DBG("No System_Status message available (normal)");
 	}
 
 	/* Configure touch detection */
