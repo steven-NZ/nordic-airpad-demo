@@ -65,9 +65,9 @@ typedef struct {
 /* Request_Message Structure (ID: 0x06) - Used to request data from device */
 typedef struct {
 	mgc3130_msg_header_t header;  /* 4 bytes: size, flags, seq, id=0x06 */
-	uint8_t requested_msg_id;     /* 1 byte: Message ID to request (e.g., 0x83 for FW_Version_Info) */
+	uint8_t requested_msg_id;     /* 1 byte: Message ID to request */
 	uint8_t reserved[3];          /* 3 bytes: Reserved */
-	uint32_t param;               /* 4 bytes: Parameter (typically 0) */
+	uint32_t param;               /* 4 bytes: Parameter */
 } __packed mgc3130_request_msg_t;
 
 /* SET_RUNTIME_PARAMETER Message Structure */
