@@ -40,6 +40,7 @@ typedef struct {
 	bool fw_version_valid;
 	mgc3130_config_t config;           /* Configuration state */
 	mgc3130_touch_state_t touch_state; /* Touch tracking state */
+	mgc3130_airwheel_state_t airwheel_state;  /* Airwheel tracking state */
 	bool configured;                    /* Runtime parameters configured */
 } mgc_handler_instance_t;
 
@@ -242,7 +243,7 @@ static int mgc3130_set_runtime_parameter(uint16_t param_id, uint32_t arg0, uint3
 	status = (mgc3130_system_status_msg_t *)buf;
 
 	if (status->error_code != 0) {
-		LOG_ERR("Parameter set failed with error code: 0x%02X", status->error_code);
+		LOG_ERR("Parameter set failed with error code: 0x%04X", status->error_code);
 		return -EIO;
 	}
 
@@ -301,12 +302,61 @@ static int mgc3130_configure_touch(void)
 }
 
 /*
- * Read and parse Sensor_Data_Output message
+ * Configure MGC3130 for airwheel detection
+ * Enables airwheel detection and AirWheelInfo output
  *
- * @param touch_info: Output pointer for touch information (can be NULL)
  * @return: 0 on success, negative error code on failure
  */
-static int mgc3130_read_sensor_data(mgc3130_touch_info_t *touch_info)
+static int mgc3130_configure_airwheel(void)
+{
+	int ret;
+
+	LOG_INF("Configuring MGC3130 for airwheel detection...");
+
+	/* Step 1: Enable airwheel detection (dspAirWheelConfig = 0x0090) */
+	/* CRITICAL: arg1 MUST be 0x20 or system malfunction occurs */
+	ret = mgc3130_set_runtime_parameter(
+		0x90,              /* param_id: DSP AirWheel Config */
+		0x20,              /* arg0: 0x20 = enable airwheel */
+		0x20               /* arg1: 0x20 = CRITICAL */
+	);
+
+	if (ret < 0) {
+		LOG_ERR("Failed to enable airwheel detection: %d", ret);
+		return ret;
+	}
+
+	/* Step 2: Enable AirWheelInfo in data output (both TouchInfo AND AirWheelInfo) */
+	ret = mgc3130_set_runtime_parameter(
+		MGC3130_PARAM_DATA_OUTPUT_ENABLE,
+		MGC3130_OUTPUT_TOUCH_INFO | MGC3130_OUTPUT_AIR_WHEEL_INFO,  /* Bits 2 and 3 */
+		0xFFFFFFFF                                                   /* Overwrite mask */
+	);
+	if (ret < 0) {
+		LOG_ERR("Failed to enable AirWheelInfo output: %d", ret);
+		return ret;
+	}
+
+	/* Update configuration state */
+	mgc_inst.config.airwheel_enabled = true;
+	mgc_inst.config.output_mask |= MGC3130_OUTPUT_AIR_WHEEL_INFO;
+
+	/* Initialize airwheel state */
+	mgc_inst.airwheel_state.current_counter = 0;
+	mgc_inst.airwheel_state.previous_counter = 0;
+	mgc_inst.airwheel_state.airwheel_valid = false;
+
+	LOG_INF("MGC3130 airwheel detection configured successfully");
+	return 0;
+}
+
+/*
+ * Read and parse Sensor_Data_Output message
+ *
+ * @param output: Output pointer for all sensor data (touch + airwheel + system_info)
+ * @return: 0 on success, negative error code on failure
+ */
+static int mgc3130_read_sensor_data(mgc3130_sensor_output_t *output)
 {
 	uint8_t buf[MGC3130_MSG_BUF_SIZE];
 	int ret;
@@ -341,25 +391,57 @@ static int mgc3130_read_sensor_data(mgc3130_touch_info_t *touch_info)
 	config_mask = buf[offset] | (buf[offset + 1] << 8);
 	offset += 2;
 
-	/* Skip timestamp (1 byte) and system_info (1 byte) */
-	offset += 2;
+	/* Parse timestamp (1 byte) */
+	if (offset + 1 > msg_size) {
+		LOG_ERR("Message too short for timestamp");
+		return -EINVAL;
+	}
+	uint8_t timestamp = buf[offset];
+	offset += 1;
+
+	/* Parse system_info (1 byte) */
+	if (offset + 1 > msg_size) {
+		LOG_ERR("Message too short for system_info");
+		return -EINVAL;
+	}
+	uint8_t system_info = buf[offset];
+	offset += 1;
+
+	/* Initialize output structure */
+	if (output != NULL) {
+		memset(output, 0, sizeof(mgc3130_sensor_output_t));
+		output->system_info = system_info;
+	}
 
 	/* Parse variable fields based on config_mask */
 
 	/* TouchInfo field (4 bytes) - bit 2 */
-	if ((config_mask & MGC3130_OUTPUT_TOUCH_INFO) && touch_info != NULL) {
+	if ((config_mask & MGC3130_OUTPUT_TOUCH_INFO) && output != NULL) {
 		if (offset + 4 > msg_size) {
 			LOG_ERR("Message too short for TouchInfo field");
 			return -EINVAL;
 		}
 
-		touch_info->touch_flags = buf[offset] | (buf[offset + 1] << 8);
-		touch_info->touch_counter = buf[offset + 2];
-		touch_info->reserved = buf[offset + 3];
+		output->touch.touch_flags = buf[offset] | (buf[offset + 1] << 8);
+		output->touch.touch_counter = buf[offset + 2];
+		output->touch.reserved = buf[offset + 3];
 		offset += 4;
 	}
 
-	LOG_DBG("Sensor data parsed: config_mask=0x%04X, size=%u", config_mask, msg_size);
+	/* AirWheelInfo field (2 bytes) - bit 3 */
+	if ((config_mask & MGC3130_OUTPUT_AIR_WHEEL_INFO) && output != NULL) {
+		if (offset + 2 > msg_size) {
+			LOG_ERR("Message too short for AirWheelInfo field");
+			return -EINVAL;
+		}
+
+		output->airwheel.counter = buf[offset];
+		output->airwheel.reserved = buf[offset + 1];
+		offset += 2;
+	}
+
+	LOG_DBG("Sensor data parsed: config_mask=0x%04X, size=%u, system_info=0x%02X",
+	        config_mask, msg_size, system_info);
 	return 0;
 }
 
@@ -395,6 +477,72 @@ static void mgc3130_process_touch_state(const mgc3130_touch_info_t *touch_info)
 		        (touch_electrodes & MGC3130_TOUCH_SOUTH) ? 1 : 0,
 		        (touch_electrodes & MGC3130_TOUCH_WEST)  ? 1 : 0);
 	}
+}
+
+/*
+ * Process airwheel state transitions and log rotation
+ * Detects counter changes and determines rotation direction
+ * Handles counter wraparound (0-255)
+ *
+ * @param output: Current sensor data including airwheel info and system_info
+ */
+static void mgc3130_process_airwheel_state(const mgc3130_sensor_output_t *output)
+{
+	uint8_t current_counter = output->airwheel.counter;
+	uint8_t previous_counter = mgc_inst.airwheel_state.previous_counter;
+	bool airwheel_active = (output->system_info & 0x02) != 0;  /* Bit 1: AirWheelValid */
+	static bool first_sample = true;
+
+	/* Update previous counter */
+	mgc_inst.airwheel_state.previous_counter = current_counter;
+
+	/* Check for valid-to-invalid or invalid-to-valid transition */
+	if (airwheel_active != mgc_inst.airwheel_state.airwheel_valid) {
+		mgc_inst.airwheel_state.airwheel_valid = airwheel_active;
+		if (airwheel_active) {
+			LOG_INF("Airwheel: ACTIVE");
+			first_sample = true;  /* Reset on activation */
+		} else {
+			LOG_INF("Airwheel: INACTIVE");
+		}
+	}
+
+	/* Only process counter changes if airwheel is valid */
+	if (!airwheel_active) {
+		return;
+	}
+
+	/* Skip first sample to establish baseline */
+	if (first_sample) {
+		first_sample = false;
+		return;
+	}
+
+	/* Skip if counter hasn't changed */
+	if (current_counter == previous_counter) {
+		return;
+	}
+
+	/* Determine direction and handle wraparound */
+	int16_t delta = (int16_t)current_counter - (int16_t)previous_counter;
+	const char *direction;
+
+	/* Handle wraparound: if delta magnitude > 128, counter wrapped */
+	if (delta > 128) {
+		/* Wrapped backward: e.g., 250 -> 5 is actually CCW */
+		delta = delta - 256;
+		direction = "CCW";
+	} else if (delta < -128) {
+		/* Wrapped forward: e.g., 5 -> 250 is actually CW */
+		delta = delta + 256;
+		direction = "CW";
+	} else {
+		/* No wraparound */
+		direction = (delta > 0) ? "CW" : "CCW";
+	}
+
+	LOG_INF("Airwheel: %s, Counter: %u (delta: %d)",
+	        direction, current_counter, delta);
 }
 
 /*
@@ -631,7 +779,7 @@ ssize_t mgc_read(driver_fd_t fd, void *buf, size_t count)
 {
 	int ret;
 	int ts_value;
-	mgc3130_touch_info_t touch_info;
+	mgc3130_sensor_output_t sensor_output;
 
 	if (mgc_inst.base.state != DRIVER_STATE_OPEN) {
 		LOG_ERR("Driver not open");
@@ -655,7 +803,7 @@ ssize_t mgc_read(driver_fd_t fd, void *buf, size_t count)
 	}
 
 	/* TS is low - data ready, read sensor data */
-	ret = mgc3130_read_sensor_data(&touch_info);
+	ret = mgc3130_read_sensor_data(&sensor_output);
 	if (ret < 0) {
 		LOG_WRN("Failed to read sensor data: %d", ret);
 		DRIVER_UNLOCK(&mgc_inst.base);
@@ -663,16 +811,25 @@ ssize_t mgc_read(driver_fd_t fd, void *buf, size_t count)
 	}
 
 	/* Process touch state transitions and log */
-	mgc3130_process_touch_state(&touch_info);
+	mgc3130_process_touch_state(&sensor_output.touch);
 
-	/* Copy touch_info to user buffer if provided */
-	if (buf != NULL && count >= sizeof(mgc3130_touch_info_t)) {
-		memcpy(buf, &touch_info, sizeof(mgc3130_touch_info_t));
+	/* Process airwheel state transitions and log */
+	mgc3130_process_airwheel_state(&sensor_output);
+
+	/* Copy sensor_output to user buffer if provided */
+	if (buf != NULL) {
+		if (count >= sizeof(mgc3130_sensor_output_t)) {
+			/* Full output requested */
+			memcpy(buf, &sensor_output, sizeof(mgc3130_sensor_output_t));
+		} else if (count >= sizeof(mgc3130_touch_info_t)) {
+			/* Legacy: only touch info requested */
+			memcpy(buf, &sensor_output.touch, sizeof(mgc3130_touch_info_t));
+		}
 	}
 
 	DRIVER_UNLOCK(&mgc_inst.base);
 
-	return sizeof(mgc3130_touch_info_t);
+	return sizeof(mgc3130_sensor_output_t);
 }
 
 int mgc_ioctl(driver_fd_t fd, unsigned int cmd, void *arg)
@@ -802,6 +959,13 @@ static int mgc_init(void)
 		/* Don't fail initialization - allow manual configuration via ioctl */
 	} else {
 		mgc_inst.configured = true;
+	}
+
+	/* Configure airwheel detection alongside touch */
+	ret = mgc3130_configure_airwheel();
+	if (ret < 0) {
+		LOG_ERR("Failed to configure airwheel detection: %d", ret);
+		mgc_inst.config.airwheel_enabled = false;
 	}
 
 	/* State remains DRIVER_STATE_CLOSED - application must call open() */

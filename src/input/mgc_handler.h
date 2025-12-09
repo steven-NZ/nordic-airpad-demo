@@ -26,6 +26,7 @@ typedef struct {
 
 /* Runtime Parameter IDs */
 #define MGC3130_PARAM_DSP_TOUCH_CONFIG   0x97
+#define MGC3130_PARAM_DSP_AIR_WHEEL_CONFIG  0x90
 #define MGC3130_PARAM_DATA_OUTPUT_ENABLE 0xA0
 
 /* DataOutputConfigMask bits */
@@ -76,6 +77,12 @@ typedef struct {
 	uint8_t reserved;          /* Reserved */
 } __packed mgc3130_touch_info_t;
 
+/* AirWheelInfo Field Structure (2 bytes) */
+typedef struct {
+	uint8_t counter;       /* Counter value (0-255): increments CW, decrements CCW */
+	uint8_t reserved;      /* Reserved */
+} __packed mgc3130_airwheel_info_t;
+
 /* Sensor_Data_Output Message Structure (variable size) */
 typedef struct {
 	mgc3130_msg_header_t header;   /* size varies, id=0x91 */
@@ -94,9 +101,24 @@ typedef struct {
 	bool touch_active;         /* True if any electrode is touched */
 } mgc3130_touch_state_t;
 
+/* AirWheel State Tracking Structure */
+typedef struct {
+	uint8_t current_counter;      /* Current counter value */
+	uint8_t previous_counter;     /* Previous counter value */
+	bool airwheel_valid;          /* True if airwheel is active (from SystemInfo bit 1) */
+} mgc3130_airwheel_state_t;
+
+/* Combined sensor data return structure */
+typedef struct {
+	mgc3130_touch_info_t touch;
+	mgc3130_airwheel_info_t airwheel;
+	uint8_t system_info;       /* From sensor data output (bit 1 = AirWheelValid) */
+} mgc3130_sensor_output_t;
+
 /* MGC3130 Configuration */
 typedef struct {
 	bool touch_enabled;        /* Touch detection configured */
+	bool airwheel_enabled;     /* Airwheel detection configured */
 	uint16_t output_mask;      /* Current output configuration mask */
 } mgc3130_config_t;
 
