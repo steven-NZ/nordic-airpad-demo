@@ -26,6 +26,7 @@ LOG_MODULE_REGISTER(mgc_handler, LOG_LEVEL_INF);
 #define MGC3130_BOOT_DELAY_MS         	100
 #define MGC3130_POST_TRANSFER_DELAY_US 	200
 #define MGC3130_TS_TIMEOUT_MS         	500
+#define MGC3130_PARAM_PROCESSING_DELAY_MS  10
 
 /* Message Buffer Size */
 #define MGC3130_MSG_BUF_SIZE  256
@@ -94,7 +95,7 @@ static int wait_for_ts_ready(uint32_t timeout_ms)
 static int mgc3130_read_message(uint8_t *buf, size_t max_len)
 {
 	int ret;
-	uint16_t msg_size;
+	uint8_t msg_size;
 
 	/* Wait for TS low (data ready) */
 	ret = wait_for_ts_ready(MGC3130_TS_TIMEOUT_MS);
@@ -112,7 +113,7 @@ static int mgc3130_read_message(uint8_t *buf, size_t max_len)
 	/* I2C STOP condition releases TS line */
 
 	/* Parse message size from header (little-endian) */
-	msg_size = buf[0] | (buf[1] << 8);
+	msg_size = buf[0];
 
 	/* Mandatory 200μs wait after transfer */
 	k_usleep(MGC3130_POST_TRANSFER_DELAY_US);
@@ -140,7 +141,9 @@ static int mgc3130_write_message(const uint8_t *buf, size_t len)
 	/* Mandatory 200μs wait after transfer */
 	k_usleep(MGC3130_POST_TRANSFER_DELAY_US);
 
-	LOG_DBG("Write message: len=%u", len);
+	LOG_ERR("Write message: len=%u", len);
+	// LOG_WRN("Raw System_Status: [0]=%02X [1]=%02X [2]=%02X [3]=%02X [4]=%02X [5]=%02X [6]=%02X [7]=%02X [8]=%02X [9]=%02X [10]=%02X [11]=%02X [12]=%02X [13]=%02X [14]=%02X [15]=%02X",
+	//         buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7], buf[8], buf[9], buf[10], buf[11], buf[12], buf[13], buf[14], buf[15]);
 
 	return 0;
 }
@@ -192,11 +195,11 @@ static int mgc3130_set_runtime_parameter(uint16_t param_id, uint32_t arg0, uint3
 	mgc3130_set_runtime_param_msg_t msg;
 	mgc3130_system_status_msg_t *status;
 	int ret;
-	uint16_t msg_size;
+	uint8_t msg_size;
 	uint8_t msg_id;
 
 	/* Build SET_RUNTIME_PARAMETER message */
-	msg.header.size = sizeof(mgc3130_set_runtime_param_msg_t);
+	msg.header.size = 0x10;
 	msg.header.flags = 0;
 	msg.header.seq = 0;
 	msg.header.id = MGC3130_MSG_SET_RUNTIME_PARAMETER;
@@ -222,7 +225,7 @@ static int mgc3130_set_runtime_parameter(uint16_t param_id, uint32_t arg0, uint3
 		return ret;
 	}
 
-	msg_size = buf[0] | (buf[1] << 8);
+	msg_size = buf[0];
 	msg_id = buf[3];
 
 	/* Validate response is System_Status */
@@ -230,6 +233,10 @@ static int mgc3130_set_runtime_parameter(uint16_t param_id, uint32_t arg0, uint3
 		LOG_ERR("Unexpected response ID: 0x%02X (expected 0x15)", msg_id);
 		return -EINVAL;
 	}
+
+	// /* Log raw System_Status bytes for analysis */
+	// LOG_WRN("Raw System_Status: [0]=%02X [1]=%02X [2]=%02X [3]=%02X [4]=%02X [5]=%02X [6]=%02X [7]=%02X",
+	//         buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7]);
 
 	/* Parse System_Status */
 	status = (mgc3130_system_status_msg_t *)buf;
@@ -261,6 +268,7 @@ static int mgc3130_configure_touch(void)
 		0x08,        /* arg0: 0x08 = enable touch */
 		0x08         /* arg1: 0x08 = required value */
 	);
+	
 	if (ret < 0) {
 		LOG_ERR("Failed to enable touch detection: %d", ret);
 		return ret;
@@ -302,7 +310,7 @@ static int mgc3130_read_sensor_data(mgc3130_touch_info_t *touch_info)
 {
 	uint8_t buf[MGC3130_MSG_BUF_SIZE];
 	int ret;
-	uint16_t msg_size;
+	uint8_t msg_size;
 	uint8_t msg_id;
 	uint16_t config_mask;
 	size_t offset;
@@ -313,7 +321,7 @@ static int mgc3130_read_sensor_data(mgc3130_touch_info_t *touch_info)
 		return ret;
 	}
 
-	msg_size = buf[0] | (buf[1] << 8);
+	msg_size = buf[0];
 	msg_id = buf[3];
 
 	/* Validate message ID */
@@ -479,7 +487,7 @@ static int mgc3130_get_fw_version(mgc3130_fw_version_t *ver)
 	uint8_t buf[MGC3130_MSG_BUF_SIZE];
 	int ret;
 	uint8_t msg_id;
-	uint16_t msg_size;
+	uint8_t msg_size;
 	size_t payload_offset;
 	size_t payload_len;
 
@@ -510,7 +518,7 @@ static int mgc3130_get_fw_version(mgc3130_fw_version_t *ver)
 		return ret;
 	}
 
-	msg_size = buf[0] | (buf[1] << 8);
+	msg_size = buf[0];
 	msg_id = buf[3];
 
 	/* Validate message ID */

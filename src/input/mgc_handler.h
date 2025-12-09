@@ -18,15 +18,15 @@
 
 /* MGC3130 Message Header */
 typedef struct {
-	uint16_t size;      /* Total message size including header */
+	uint8_t size;      /* Message Size */
 	uint8_t  flags;     /* Message flags */
 	uint8_t  seq;       /* Sequence counter */
 	uint8_t  id;        /* Message ID */
 } __packed mgc3130_msg_header_t;
 
 /* Runtime Parameter IDs */
-#define MGC3130_PARAM_DSP_TOUCH_CONFIG   0x0097
-#define MGC3130_PARAM_DATA_OUTPUT_ENABLE 0x00A0
+#define MGC3130_PARAM_DSP_TOUCH_CONFIG   0x97
+#define MGC3130_PARAM_DATA_OUTPUT_ENABLE 0xA0
 
 /* DataOutputConfigMask bits */
 #define MGC3130_OUTPUT_DSP_STATUS      (1 << 0)
@@ -42,6 +42,15 @@ typedef struct {
 #define MGC3130_TOUCH_EAST    (1 << 3)
 #define MGC3130_TOUCH_CENTER  (1 << 4)
 
+/* Request Message Structure */
+typedef struct {
+	mgc3130_msg_header_t header;  /* 4 bytes: size, flags, seq, id=0x15 */
+	uint8_t msg_id;               /* Message ID which System_Status corresponds to */
+	uint16_t reserved;         /* Maximum I2C packet size device accepts */
+	uint8_t reserved1; 
+	uint32_t param;          /* Error code for previous message (16-bit) */
+} __packed mgc3130_request_msg_t;
+
 /* SET_RUNTIME_PARAMETER Message Structure */
 typedef struct {
 	mgc3130_msg_header_t header;  /* size=16, flags=0, seq=0, id=0xA2 */
@@ -53,10 +62,11 @@ typedef struct {
 
 /* System_Status Message Structure */
 typedef struct {
-	mgc3130_msg_header_t header;  /* size varies, id=0x15 */
-	uint8_t error_code;           /* Error code (0 = success) */
-	uint8_t system_info;          /* System status flags */
-	/* Additional fields may follow depending on size */
+	mgc3130_msg_header_t header;  /* 4 bytes: size, flags, seq, id=0x15 */
+	uint8_t msg_id;               /* Message ID which System_Status corresponds to */
+	uint8_t max_cmd_size;         /* Maximum I2C packet size device accepts */
+	uint16_t error_code;          /* Error code for previous message (16-bit) */
+	uint64_t reserved;            /* Reserved (4 bytes) */
 } __packed mgc3130_system_status_msg_t;
 
 /* TouchInfo Field Structure (4 bytes) */
