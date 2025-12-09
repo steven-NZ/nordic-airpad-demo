@@ -21,12 +21,12 @@ LOG_MODULE_REGISTER(mgc_handler, LOG_LEVEL_INF);
 #define MGC3130_MCLR_PIN  28  /* Reset pin (active low) */
 #define MGC3130_TS_PIN    29  /* Transfer Status pin */
 
-/* Timing Constants */
-#define MGC3130_RESET_DELAY_MS          5   /* Reset pulse width */
-#define MGC3130_BOOT_DELAY_MS           5  /* Boot time after reset */
-#define MGC3130_POST_TRANSFER_DELAY_US  200  /* I2C bus timing (per datasheet) */
-#define MGC3130_TS_TIMEOUT_MS           1  /* TS line poll timeout */
-#define MGC3130_INTER_COMMAND_DELAY_MS  1   /* Delay between I2C operations for device processing */
+/* Timing Constants (from MGC3130 datasheet) */
+#define MGC3130_RESET_DELAY_MS          5    /* MCLR pulse width: min 5ms to reset device */
+#define MGC3130_BOOT_DELAY_MS           5    /* Boot time after reset: allow firmware init */
+#define MGC3130_POST_TRANSFER_DELAY_US  200  /* Mandatory I2C post-transfer delay (datasheet §7.1) */
+#define MGC3130_TS_TIMEOUT_MS           1    /* Transfer Status line ready timeout */
+#define MGC3130_INTER_COMMAND_DELAY_MS  1    /* Inter-command delay for device processing */
 
 /* Message Buffer Size */
 #define MGC3130_MSG_BUF_SIZE  256
@@ -50,15 +50,6 @@ static mgc_handler_instance_t mgc_inst = {
 		.flags = 0,
 	},
 	.fw_version_valid = false,
-};
-
-/* Request Message to request Fw_Version_Info */
-static const uint8_t request_fw_version[] = {
-	0x0C,  /* Size: 12 bytes (little-endian) */
-	0x00,        /* Flags */
-	0x06,        /* ID: Request_Message */
-	0x83,        /* Payload: request FW_Version_Info (0x83) */
-	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
 };
 
 /* Helper Functions */
@@ -282,8 +273,8 @@ static int mgc3130_configure_touch(void)
 	/* Step 1: Enable touch detection (dspTouchConfig = 0x0097) */
 	ret = mgc3130_set_runtime_parameter(
 		MGC3130_PARAM_DSP_TOUCH_CONFIG,
-		0x08,        /* arg0: 0x08 = enable touch */
-		0x08         /* arg1: 0x08 = required value */
+		MGC3130_TOUCH_CONFIG_ENABLE_ARG0,
+		MGC3130_TOUCH_CONFIG_ENABLE_ARG1
 	);
 	
 	if (ret < 0) {
@@ -294,8 +285,8 @@ static int mgc3130_configure_touch(void)
 	/* Step 2: Enable TouchInfo in data output (DataOutputEnableMask = 0x00A0) */
 	ret = mgc3130_set_runtime_parameter(
 		MGC3130_PARAM_DATA_OUTPUT_ENABLE,
-		MGC3130_OUTPUT_TOUCH_INFO,  /* arg0: 0x00000002 = TouchInfo field */
-		0xFFFFFFFF                   /* arg1: 0xFFFFFFFF = overwrite mask */
+		MGC3130_OUTPUT_TOUCH_INFO,
+		MGC3130_OUTPUT_MASK_OVERWRITE
 	);
 	if (ret < 0) {
 		LOG_ERR("Failed to enable TouchInfo output: %d", ret);
@@ -329,12 +320,11 @@ static int mgc3130_configure_airwheel(void)
 
 	LOG_INF("Configuring MGC3130 for airwheel detection...");
 
-	/* Step 1: Enable airwheel detection (dspAirWheelConfig = 0x0090) */
-	/* CRITICAL: arg1 MUST be 0x20 or system malfunction occurs */
+	/* Step 1: Enable airwheel detection */
 	ret = mgc3130_set_runtime_parameter(
-		0x90,              /* param_id: DSP AirWheel Config */
-		0x20,              /* arg0: 0x20 = enable airwheel */
-		0x20               /* arg1: 0x20 = CRITICAL */
+		MGC3130_PARAM_DSP_AIR_WHEEL_CONFIG,
+		MGC3130_AIRWHEEL_CONFIG_ENABLE_ARG0,
+		MGC3130_AIRWHEEL_CONFIG_ENABLE_ARG1  /* CRITICAL: must be 0x20 */
 	);
 
 	if (ret < 0) {
@@ -345,8 +335,8 @@ static int mgc3130_configure_airwheel(void)
 	/* Step 2: Enable AirWheelInfo in data output (both TouchInfo AND AirWheelInfo) */
 	ret = mgc3130_set_runtime_parameter(
 		MGC3130_PARAM_DATA_OUTPUT_ENABLE,
-		MGC3130_OUTPUT_TOUCH_INFO | MGC3130_OUTPUT_AIR_WHEEL_INFO,  /* Bits 2 and 3 */
-		0xFFFFFFFF                                                   /* Overwrite mask */
+		MGC3130_OUTPUT_TOUCH_INFO | MGC3130_OUTPUT_AIR_WHEEL_INFO,
+		MGC3130_OUTPUT_MASK_OVERWRITE
 	);
 	if (ret < 0) {
 		LOG_ERR("Failed to enable AirWheelInfo output: %d", ret);
@@ -474,8 +464,8 @@ static void mgc3130_process_touch_state(const mgc3130_touch_info_t *touch_info)
 	uint32_t current_time;
 	uint32_t touch_duration;
 
-	/* Extract electrode touch bits (bits 0-3: S, W, N, E) */
-	touch_electrodes = touch_info->touch_flags & 0x0F;
+	/* Extract electrode touch bits (South, West, North, East) */
+	touch_electrodes = touch_info->touch_flags & MGC3130_TOUCH_ELECTRODE_MASK;
 
 	/* Update current touch state */
 	mgc_inst.touch_state.previous_touch = mgc_inst.touch_state.current_touch;
@@ -506,7 +496,7 @@ static void mgc3130_process_airwheel_state(const mgc3130_sensor_output_t *output
 {
 	uint8_t current_counter = output->airwheel.counter;
 	uint8_t previous_counter = mgc_inst.airwheel_state.previous_counter;
-	bool airwheel_active = (output->system_info & 0x02) != 0;  /* Bit 1: AirWheelValid */
+	bool airwheel_active = (output->system_info & MGC3130_SYSINFO_AIRWHEEL_VALID) != 0;
 	static bool first_sample = true;
 
 	/* Update previous counter */
@@ -593,9 +583,9 @@ static void parse_fw_version_string(mgc3130_fw_version_t *ver)
 	}
 
 	/* Extract Platform (p:) */
-	field_start = strstr(str, "p:");
+	field_start = strstr(str, MGC3130_FW_FIELD_PLATFORM);
 	if (field_start != NULL) {
-		field_start += 2;  /* Skip "p:" */
+		field_start += strlen(MGC3130_FW_FIELD_PLATFORM);
 		field_end = strchr(field_start, ';');
 		if (field_end != NULL) {
 			field_len = field_end - field_start;
@@ -609,9 +599,9 @@ static void parse_fw_version_string(mgc3130_fw_version_t *ver)
 	}
 
 	/* Extract Colibri Suite Version (DSP:) */
-	field_start = strstr(str, "DSP:");
+	field_start = strstr(str, MGC3130_FW_FIELD_DSP);
 	if (field_start != NULL) {
-		field_start += 4;  /* Skip "DSP:" */
+		field_start += strlen(MGC3130_FW_FIELD_DSP);
 		field_end = strchr(field_start, ';');
 		if (field_end != NULL) {
 			field_len = field_end - field_start;
@@ -625,9 +615,9 @@ static void parse_fw_version_string(mgc3130_fw_version_t *ver)
 	}
 
 	/* Extract Build Time (t:) */
-	field_start = strstr(str, "t:");
+	field_start = strstr(str, MGC3130_FW_FIELD_BUILD_TIME);
 	if (field_start != NULL) {
-		field_start += 2;  /* Skip "t:" */
+		field_start += strlen(MGC3130_FW_FIELD_BUILD_TIME);
 		field_end = strchr(field_start, ';');
 		if (field_end != NULL) {
 			field_len = field_end - field_start;
@@ -661,8 +651,21 @@ static int mgc3130_get_fw_version(mgc3130_fw_version_t *ver)
 	if (ret < 0) {
 		LOG_INF("No automatic FW version, sending request...");
 
+		/* Request Message to request Fw_Version_Info */
+		const mgc3130_request_msg_t request_fw_version = {
+			.header = {
+				.size = 0x0C,                          /* 12 bytes total */
+				.flags = 0x00,
+				.seq = 0x00,
+				.id = MGC3130_MSG_REQUEST_MESSAGE      /* 0x06 */
+			},
+			.requested_msg_id = MGC3130_MSG_FW_VERSION_INFO,  /* 0x83 */
+			.reserved = {0},
+			.param = 0
+		};
+
 		/* Send Request_Message to request FW version */
-		ret = mgc3130_write_message(request_fw_version, sizeof(request_fw_version));
+		ret = mgc3130_write_message((const uint8_t *)&request_fw_version, sizeof(request_fw_version));
 		if (ret < 0) {
 			LOG_ERR("Failed to send request message");
 			return ret;

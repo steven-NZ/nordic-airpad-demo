@@ -25,9 +25,23 @@ typedef struct {
 } __packed mgc3130_msg_header_t;
 
 /* Runtime Parameter IDs */
-#define MGC3130_PARAM_DSP_TOUCH_CONFIG   0x97
-#define MGC3130_PARAM_DSP_AIR_WHEEL_CONFIG  0x90
-#define MGC3130_PARAM_DATA_OUTPUT_ENABLE 0xA0
+#define MGC3130_PARAM_DSP_TOUCH_CONFIG      0x0097  /* Touch detection configuration */
+#define MGC3130_PARAM_DSP_AIR_WHEEL_CONFIG  0x0090  /* AirWheel detection configuration */
+#define MGC3130_PARAM_DATA_OUTPUT_ENABLE    0x00A0  /* Data output enable mask */
+
+/* Touch Configuration Values */
+#define MGC3130_TOUCH_CONFIG_ENABLE_ARG0   0x08  /* Enable touch detection (arg0) */
+#define MGC3130_TOUCH_CONFIG_ENABLE_ARG1   0x08  /* Enable touch detection (arg1) */
+
+/* AirWheel Configuration Values */
+#define MGC3130_AIRWHEEL_CONFIG_ENABLE_ARG0  0x20  /* Enable airwheel (arg0) */
+#define MGC3130_AIRWHEEL_CONFIG_ENABLE_ARG1  0x20  /* Enable airwheel (arg1) - CRITICAL: must be 0x20 */
+
+/* Data Output Configuration Masks */
+#define MGC3130_OUTPUT_MASK_OVERWRITE      0xFFFFFFFF  /* Overwrite all output config bits */
+
+/* Touch Electrode Mask */
+#define MGC3130_TOUCH_ELECTRODE_MASK       0x0F  /* Bits 0-3: South, West, North, East */
 
 /* DataOutputConfigMask bits */
 #define MGC3130_OUTPUT_DSP_STATUS      (1 << 0)
@@ -43,13 +57,17 @@ typedef struct {
 #define MGC3130_TOUCH_EAST    (1 << 3)
 #define MGC3130_TOUCH_CENTER  (1 << 4)
 
-/* Request Message Structure */
+/* SystemInfo field bit definitions (from Sensor_Data_Output) */
+#define MGC3130_SYSINFO_POSITION_VALID   (1 << 0)  /* Position data valid */
+#define MGC3130_SYSINFO_AIRWHEEL_VALID   (1 << 1)  /* AirWheel gesture active */
+#define MGC3130_SYSINFO_RAW_DATA_VALID   (1 << 2)  /* Raw data available */
+
+/* Request_Message Structure (ID: 0x06) - Used to request data from device */
 typedef struct {
-	mgc3130_msg_header_t header;  /* 4 bytes: size, flags, seq, id=0x15 */
-	uint8_t msg_id;               /* Message ID which System_Status corresponds to */
-	uint16_t reserved;         /* Maximum I2C packet size device accepts */
-	uint8_t reserved1; 
-	uint32_t param;          /* Error code for previous message (16-bit) */
+	mgc3130_msg_header_t header;  /* 4 bytes: size, flags, seq, id=0x06 */
+	uint8_t requested_msg_id;     /* 1 byte: Message ID to request (e.g., 0x83 for FW_Version_Info) */
+	uint8_t reserved[3];          /* 3 bytes: Reserved */
+	uint32_t param;               /* 4 bytes: Parameter (typically 0) */
 } __packed mgc3130_request_msg_t;
 
 /* SET_RUNTIME_PARAMETER Message Structure */
@@ -125,6 +143,11 @@ typedef struct {
 /* Firmware Version Info - ASCII string buffer */
 #define MGC3130_FW_VERSION_MAX_LEN  256
 
+/* Firmware Version String Field Prefixes */
+#define MGC3130_FW_FIELD_PLATFORM     "p:"    /* Platform identifier */
+#define MGC3130_FW_FIELD_DSP          "DSP:"  /* Colibri Suite/DSP version */
+#define MGC3130_FW_FIELD_BUILD_TIME   "t:"    /* Build timestamp */
+
 typedef struct {
 	char version_string[MGC3130_FW_VERSION_MAX_LEN];  /* ASCII: "1.0.0;p:HillstarV01;..." */
 	size_t length;
@@ -141,9 +164,9 @@ int mgc_close(driver_fd_t fd);
 ssize_t mgc_read(driver_fd_t fd, void *buf, size_t count);
 int mgc_ioctl(driver_fd_t fd, unsigned int cmd, void *arg);
 
-/* IOCTL Commands */
-#define MGC_IOCTL_GET_FW_VERSION   0x01
-#define MGC_IOCTL_CONFIGURE_TOUCH  0x02
-#define MGC_IOCTL_READ_SENSOR_DATA 0x04
+/* IOCTL Commands (MGC range: 0x4000+) */
+#define MGC_IOCTL_GET_FW_VERSION   0x4001  /* Get firmware version info */
+#define MGC_IOCTL_CONFIGURE_TOUCH  0x4002  /* Configure touch detection */
+#define MGC_IOCTL_READ_SENSOR_DATA 0x4003  /* Read sensor data */
 
 #endif /* MGC_HANDLER_H */
