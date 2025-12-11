@@ -37,6 +37,7 @@ static void central_thread_entry(void *p1, void *p2, void *p3)
 	sensor_data_t sensor_packet;
 	uint8_t rx_buf[32];
 	uint8_t btn_state_raw;
+	mgc3130_esb_state_t mgc_esb_state;
 
 	LOG_INF("Central thread started");
 
@@ -104,6 +105,9 @@ static void central_thread_entry(void *p1, void *p2, void *p3)
 	LOG_INF("IMU fusion initialized (SLERP power: %.2f)",
 	        (double)fusion_config.slerp_power);
 
+	/* Initialize MGC ESB state */
+	memset(&mgc_esb_state, 0, sizeof(mgc3130_esb_state_t));
+
 	LOG_INF("All drivers opened successfully");
 
 	while (1) {
@@ -159,16 +163,30 @@ static void central_thread_entry(void *p1, void *p2, void *p3)
 			btn_state_raw = 0;
 		}
 
-		/* Poll MGC3130 touch sensor data */
-		mgc3130_touch_info_t touch_info;
-		result = mgc_read(mgc_fd, &touch_info, sizeof(touch_info));
+		/* Poll MGC3130 for sensor data (processes internally) */
+		mgc3130_sensor_output_t mgc_sensor_output;
+		result = mgc_read(mgc_fd, &mgc_sensor_output, sizeof(mgc_sensor_output));
 		if (result < 0 && result != DRIVER_ERR_AGAIN) {
 			LOG_WRN("MGC read failed: %d", (int)result);
 		}
-		/* Touch processing happens inside mgc_read() via state machine */
+
+		/* Get MGC state for ESB transmission */
+		result = mgc_ioctl(mgc_fd, MGC_IOCTL_GET_ESB_STATE, &mgc_esb_state);
+		if (result < 0) {
+			LOG_WRN("MGC ioctl GET_ESB_STATE failed: %d", (int)result);
+			/* Keep using previous state */
+		}
 
 		/* Build sensor data packet with quaternion */
 		sensor_packet.btn_state = btn_state_raw;
+
+		/* Pack MGC state (touch + airwheel) */
+		sensor_packet.mgc_state = MGC_PACK_STATE(
+			mgc_esb_state.touch_electrodes,
+			mgc_esb_state.airwheel_active,
+			mgc_esb_state.airwheel_direction_cw,
+			mgc_esb_state.airwheel_velocity
+		);
 
 		/* Get latest quaternion from fusion output (already computed in lines 91-134) */
 		if (fusion_output.valid) {

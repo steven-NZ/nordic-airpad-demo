@@ -41,6 +41,8 @@ typedef struct {
 	mgc3130_config_t config;           /* Configuration state */
 	mgc3130_touch_state_t touch_state; /* Touch tracking state */
 	mgc3130_airwheel_state_t airwheel_state;  /* Airwheel tracking state */
+	mgc3130_esb_state_t esb_state;     /* State for ESB transmission */
+	int16_t last_airwheel_delta;       /* Last airwheel delta for velocity calc */
 	bool configured;                    /* Runtime parameters configured */
 } mgc_handler_instance_t;
 
@@ -472,6 +474,9 @@ static void mgc3130_process_touch_state(const mgc3130_touch_info_t *touch_info)
 	mgc_inst.touch_state.current_touch = touch_electrodes;
 	current_time = k_uptime_get_32();
 
+	/* Update ESB state with touch electrodes */
+	mgc_inst.esb_state.touch_electrodes = touch_electrodes;
+
 	/* Detect individual electrode changes and log current state */
 	uint8_t changed_electrodes = touch_electrodes ^ mgc_inst.touch_state.previous_touch;
 
@@ -511,6 +516,12 @@ static void mgc3130_process_airwheel_state(const mgc3130_sensor_output_t *output
 		} else {
 			LOG_INF("Airwheel: INACTIVE");
 		}
+		/* Update ESB state */
+		mgc_inst.esb_state.airwheel_active = airwheel_active;
+		if (!airwheel_active) {
+			/* Reset velocity when airwheel becomes inactive */
+			mgc_inst.esb_state.airwheel_velocity = 0;
+		}
 	}
 
 	/* Only process counter changes if airwheel is valid */
@@ -547,8 +558,27 @@ static void mgc3130_process_airwheel_state(const mgc3130_sensor_output_t *output
 		direction = (delta > 0) ? "CW" : "CCW";
 	}
 
-	LOG_INF("Airwheel: %s, Counter: %u (delta: %d)",
-	        direction, current_counter, delta);
+	/* Calculate velocity level from absolute delta */
+	int abs_delta = (delta > 0) ? delta : -delta;
+	uint8_t velocity_level;
+	if (abs_delta <= 2) {
+		velocity_level = 0;  /* Very slow */
+	} else if (abs_delta <= 4) {
+		velocity_level = 1;  /* Slow */
+	} else if (abs_delta <= 6) {
+		velocity_level = 2;  /* Fast */
+	} else {
+		velocity_level = 3;  /* Super fast */
+	}
+
+	/* Update ESB state */
+	mgc_inst.esb_state.airwheel_velocity = velocity_level;
+	mgc_inst.esb_state.airwheel_direction_cw = (delta > 0);
+	mgc_inst.last_airwheel_delta = delta;
+
+	/* Per-rotation logging removed to reduce clutter - only activation/deactivation is logged */
+	// LOG_INF("Airwheel: %s, Counter: %u (delta: %d)",
+	//         direction, current_counter, delta);
 }
 
 /*
@@ -927,6 +957,16 @@ int mgc_ioctl(driver_fd_t fd, unsigned int cmd, void *arg)
 		ret = mgc3130_read_sensor_data((mgc3130_touch_info_t *)arg);
 		break;
 
+	case MGC_IOCTL_GET_ESB_STATE:
+		if (arg == NULL) {
+			ret = -EINVAL;
+			break;
+		}
+		/* Return a snapshot of current ESB state */
+		memcpy(arg, &mgc_inst.esb_state, sizeof(mgc3130_esb_state_t));
+		ret = 0;
+		break;
+
 	default:
 		LOG_WRN("Unknown ioctl command: 0x%02X", cmd);
 		ret = -EINVAL;
@@ -948,6 +988,10 @@ static int mgc_init(void)
 
 	/* Initialize mutex */
 	k_mutex_init(&mgc_inst.base.lock);
+
+	/* Initialize ESB state */
+	memset(&mgc_inst.esb_state, 0, sizeof(mgc3130_esb_state_t));
+	mgc_inst.last_airwheel_delta = 0;
 
 	/* Get I2C1 device */
 	mgc_inst.i2c_dev = DEVICE_DT_GET(DT_NODELABEL(i2c1));

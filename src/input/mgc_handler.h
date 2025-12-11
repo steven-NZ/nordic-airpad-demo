@@ -140,6 +140,14 @@ typedef struct {
 	uint16_t output_mask;      /* Current output configuration mask */
 } mgc3130_config_t;
 
+/* MGC State for ESB Transmission */
+typedef struct {
+	uint8_t touch_electrodes;   /* Bits 0-3: N, S, E, W touch state */
+	bool airwheel_active;       /* Airwheel detection active */
+	bool airwheel_direction_cw; /* True=CW, False=CCW */
+	uint8_t airwheel_velocity;  /* 0-3: velocity level */
+} mgc3130_esb_state_t;
+
 /* Firmware Version Info - ASCII string buffer */
 #define MGC3130_FW_VERSION_MAX_LEN  256
 
@@ -168,5 +176,6 @@ int mgc_ioctl(driver_fd_t fd, unsigned int cmd, void *arg);
 #define MGC_IOCTL_GET_FW_VERSION   0x4001  /* Get firmware version info */
 #define MGC_IOCTL_CONFIGURE_TOUCH  0x4002  /* Configure touch detection */
 #define MGC_IOCTL_READ_SENSOR_DATA 0x4003  /* Read sensor data */
+#define MGC_IOCTL_GET_ESB_STATE    0x4004  /* Get MGC state for ESB (mgc3130_esb_state_t*) */
 
 #endif /* MGC_HANDLER_H */

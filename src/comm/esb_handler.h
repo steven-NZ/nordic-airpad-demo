@@ -13,6 +13,7 @@
 /* Unified sensor data packet structure */
 typedef struct {
 	uint8_t btn_state;      /* 3 bits: btn1, btn2, btn3 (1=pressed, 0=released) */
+	uint8_t mgc_state;      /* MGC data: touch(4 bits) + airwheel(4 bits) */
 	int16_t quat_w;         /* Quaternion w component (scaled by 32767) */
 	int16_t quat_x;         /* Quaternion x component (scaled by 32767) */
 	int16_t quat_y;         /* Quaternion y component (scaled by 32767) */
@@ -27,6 +28,22 @@ typedef struct {
 
 /* Helper macro for quaternion float to int16_t conversion */
 #define QUAT_FLOAT_TO_INT16(f) ((int16_t)((f) * QUAT_SCALE_FACTOR))
+
+/* MGC state bit packing helpers */
+#define MGC_STATE_TOUCH_MASK        0x0F  /* Bits 0-3: Touch electrodes */
+#define MGC_STATE_AIRWHEEL_ACTIVE   0x10  /* Bit 4: Airwheel active */
+#define MGC_STATE_DIRECTION_CW      0x20  /* Bit 5: Direction (1=CW, 0=CCW) */
+#define MGC_STATE_VELOCITY_SHIFT    6     /* Bits 6-7: Velocity level */
+#define MGC_STATE_VELOCITY_MASK     0xC0  /* Bits 6-7 mask */
+
+/* Helper macro to pack MGC state into uint8_t */
+#define MGC_PACK_STATE(touch, active, dir_cw, vel) \
+	((uint8_t)( \
+		((touch) & MGC_STATE_TOUCH_MASK) | \
+		((active) ? MGC_STATE_AIRWHEEL_ACTIVE : 0) | \
+		((dir_cw) ? MGC_STATE_DIRECTION_CW : 0) | \
+		(((vel) << MGC_STATE_VELOCITY_SHIFT) & MGC_STATE_VELOCITY_MASK) \
+	))
 
 /* ESB-specific ioctl commands */
 #define ESB_IOCTL_SET_TX_POWER      0x3001  /* Set TX power (int8_t) */
