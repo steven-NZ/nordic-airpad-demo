@@ -558,17 +558,15 @@ static void mgc3130_process_airwheel_state(const mgc3130_sensor_output_t *output
 		direction = (delta > 0) ? "CW" : "CCW";
 	}
 
-	/* Calculate velocity level from absolute delta */
+	/* Calculate velocity level from absolute delta (0-63) */
 	int abs_delta = (delta > 0) ? delta : -delta;
 	uint8_t velocity_level;
-	if (abs_delta <= 2) {
-		velocity_level = 0;  /* Very slow */
-	} else if (abs_delta <= 4) {
-		velocity_level = 1;  /* Slow */
-	} else if (abs_delta <= 6) {
-		velocity_level = 2;  /* Fast */
+
+	/* Cap velocity at 63 (6-bit max) */
+	if (abs_delta > 63) {
+		velocity_level = 63;
 	} else {
-		velocity_level = 3;  /* Super fast */
+		velocity_level = (uint8_t)abs_delta;
 	}
 
 	/* Update ESB state */
@@ -576,9 +574,9 @@ static void mgc3130_process_airwheel_state(const mgc3130_sensor_output_t *output
 	mgc_inst.esb_state.airwheel_direction_cw = (delta > 0);
 	mgc_inst.last_airwheel_delta = delta;
 
-	/* Per-rotation logging removed to reduce clutter - only activation/deactivation is logged */
-	// LOG_INF("Airwheel: %s, Counter: %u (delta: %d)",
-	//         direction, current_counter, delta);
+	/* Log counter, delta, and velocity for testing */
+	LOG_INF("Airwheel: %s | Counter: %3u | Delta: %3d | Velocity: %u",
+	        direction, current_counter, delta, velocity_level);
 }
 
 /*

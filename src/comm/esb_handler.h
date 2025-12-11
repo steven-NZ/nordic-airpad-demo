@@ -13,7 +13,7 @@
 /* Unified sensor data packet structure */
 typedef struct {
 	uint8_t btn_state;      /* 3 bits: btn1, btn2, btn3 (1=pressed, 0=released) */
-	uint8_t mgc_state;      /* MGC data: touch(4 bits) + airwheel(4 bits) */
+	uint16_t mgc_state;     /* MGC data: touch(byte 1) + airwheel(byte 2) */
 	int16_t quat_w;         /* Quaternion w component (scaled by 32767) */
 	int16_t quat_x;         /* Quaternion x component (scaled by 32767) */
 	int16_t quat_y;         /* Quaternion y component (scaled by 32767) */
@@ -29,21 +29,31 @@ typedef struct {
 /* Helper macro for quaternion float to int16_t conversion */
 #define QUAT_FLOAT_TO_INT16(f) ((int16_t)((f) * QUAT_SCALE_FACTOR))
 
-/* MGC state bit packing helpers */
-#define MGC_STATE_TOUCH_MASK        0x0F  /* Bits 0-3: Touch electrodes */
-#define MGC_STATE_AIRWHEEL_ACTIVE   0x10  /* Bit 4: Airwheel active */
-#define MGC_STATE_DIRECTION_CW      0x20  /* Bit 5: Direction (1=CW, 0=CCW) */
-#define MGC_STATE_VELOCITY_SHIFT    6     /* Bits 6-7: Velocity level */
-#define MGC_STATE_VELOCITY_MASK     0xC0  /* Bits 6-7 mask */
+/* MGC state bit packing helpers (2-byte layout) */
+/* Byte 1 (Touch) - Lower 8 bits */
+#define MGC_TOUCH_MASK              0x000F  /* Bits 0-3: Touch electrodes */
+#define MGC_TOUCH_RESERVED_MASK     0x00F0  /* Bits 4-7: Reserved */
 
-/* Helper macro to pack MGC state into uint8_t */
+/* Byte 2 (Airwheel) - Upper 8 bits */
+#define MGC_AIRWHEEL_ACTIVE         0x0100  /* Bit 8: Airwheel active */
+#define MGC_AIRWHEEL_DIRECTION_CW   0x0200  /* Bit 9: Direction (1=CW, 0=CCW) */
+#define MGC_AIRWHEEL_VELOCITY_SHIFT 10      /* Bits 10-15: Velocity (0-63) */
+#define MGC_AIRWHEEL_VELOCITY_MASK  0xFC00  /* Bits 10-15 mask */
+
+/* Helper macro to pack MGC state into uint16_t */
 #define MGC_PACK_STATE(touch, active, dir_cw, vel) \
-	((uint8_t)( \
-		((touch) & MGC_STATE_TOUCH_MASK) | \
-		((active) ? MGC_STATE_AIRWHEEL_ACTIVE : 0) | \
-		((dir_cw) ? MGC_STATE_DIRECTION_CW : 0) | \
-		(((vel) << MGC_STATE_VELOCITY_SHIFT) & MGC_STATE_VELOCITY_MASK) \
+	((uint16_t)( \
+		((touch) & MGC_TOUCH_MASK) | \
+		((active) ? MGC_AIRWHEEL_ACTIVE : 0) | \
+		((dir_cw) ? MGC_AIRWHEEL_DIRECTION_CW : 0) | \
+		(((vel) << MGC_AIRWHEEL_VELOCITY_SHIFT) & MGC_AIRWHEEL_VELOCITY_MASK) \
 	))
+
+/* Helper macros to unpack MGC state from uint16_t */
+#define MGC_UNPACK_TOUCH(state)            ((uint8_t)((state) & MGC_TOUCH_MASK))
+#define MGC_UNPACK_AIRWHEEL_ACTIVE(state)  (((state) & MGC_AIRWHEEL_ACTIVE) != 0)
+#define MGC_UNPACK_DIRECTION_CW(state)     (((state) & MGC_AIRWHEEL_DIRECTION_CW) != 0)
+#define MGC_UNPACK_VELOCITY(state)         ((uint8_t)(((state) & MGC_AIRWHEEL_VELOCITY_MASK) >> MGC_AIRWHEEL_VELOCITY_SHIFT))
 
 /* ESB-specific ioctl commands */
 #define ESB_IOCTL_SET_TX_POWER      0x3001  /* Set TX power (int8_t) */
