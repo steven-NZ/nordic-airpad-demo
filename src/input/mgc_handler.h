@@ -35,7 +35,7 @@ typedef struct {
 
 /* AirWheel Configuration Values */
 #define MGC3130_AIRWHEEL_CONFIG_ENABLE_ARG0  0x20  /* Enable airwheel (arg0) */
-#define MGC3130_AIRWHEEL_CONFIG_ENABLE_ARG1  0x20  /* Enable airwheel (arg1) - CRITICAL: must be 0x20 */
+#define MGC3130_AIRWHEEL_CONFIG_ENABLE_ARG1  0x20  /* Enable airwheel (arg1) */
 
 /* Data Output Configuration Masks */
 #define MGC3130_OUTPUT_MASK_OVERWRITE      0xFFFFFFFF  /* Overwrite all output config bits */

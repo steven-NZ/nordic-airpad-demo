@@ -66,15 +66,6 @@ static void central_thread_entry(void *p1, void *p2, void *p3)
 	}
 	LOG_INF("MGC handler opened with fd=%d", mgc_fd);
 
-	// /* Read MGC3130 firmware version */
-	// mgc3130_fw_version_t mgc_fw_ver;
-	// result = mgc_ioctl(mgc_fd, MGC_IOCTL_GET_FW_VERSION, &mgc_fw_ver);
-	// if (result == 0) {
-	// 	LOG_INF("MGC3130 FW Version: %s", mgc_fw_ver.version_string);
-	// } else {
-	// 	LOG_WRN("Failed to read MGC3130 FW version: %d", (int)result);
-	// }
-
 	esb_fd = esb_open(0);
 	if (esb_fd < 0) {
 		LOG_ERR("Failed to open ESB driver: %d", esb_fd);
@@ -188,7 +179,7 @@ static void central_thread_entry(void *p1, void *p2, void *p3)
 			mgc_esb_state.airwheel_velocity
 		);
 
-		/* Get latest quaternion from fusion output (already computed in lines 91-134) */
+		/* Get latest quaternion from fusion output */
 		if (fusion_output.valid) {
 			/* Convert quaternion float to int16_t with scaling */
 			sensor_packet.quat_w = QUAT_FLOAT_TO_INT16(fusion_output.orientation.w);
@@ -196,7 +187,7 @@ static void central_thread_entry(void *p1, void *p2, void *p3)
 			sensor_packet.quat_y = QUAT_FLOAT_TO_INT16(fusion_output.orientation.y);
 			sensor_packet.quat_z = QUAT_FLOAT_TO_INT16(fusion_output.orientation.z);
 		} else {
-			/* Fusion not ready - send identity quaternion (no rotation) */
+			/* Fusion not ready - send identity quaternion */
 			sensor_packet.quat_w = QUAT_FLOAT_TO_INT16(1.0f);
 			sensor_packet.quat_x = 0;
 			sensor_packet.quat_y = 0;
