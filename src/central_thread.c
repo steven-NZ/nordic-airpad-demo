@@ -7,6 +7,7 @@
 #include "central_thread.h"
 #include "comm/esb_handler.h"
 #include "input/btn_handler.h"
+#include "input/mgc_handler.h"
 #include "sensors/imu_handler.h"
 #include "sensors/imu_fusion.h"
 #include "sensors/imu_math.h"
@@ -23,6 +24,7 @@ LOG_MODULE_REGISTER(central_thread, LOG_LEVEL_INF);
 /* Driver file descriptors */
 static driver_fd_t imu_fd = DRIVER_FD_INVALID;
 static driver_fd_t btn_fd = DRIVER_FD_INVALID;
+static driver_fd_t mgc_fd = DRIVER_FD_INVALID;
 static driver_fd_t esb_fd = DRIVER_FD_INVALID;
 
 /* IMU fusion state */
@@ -35,6 +37,7 @@ static void central_thread_entry(void *p1, void *p2, void *p3)
 	sensor_data_t sensor_packet;
 	uint8_t rx_buf[32];
 	uint8_t btn_state_raw;
+	mgc3130_esb_state_t mgc_esb_state;
 
 	LOG_INF("Central thread started");
 
@@ -54,9 +57,19 @@ static void central_thread_entry(void *p1, void *p2, void *p3)
 	}
 	LOG_INF("Button driver opened with fd=%d", btn_fd);
 
+	mgc_fd = mgc_open();
+	if (mgc_fd < 0) {
+		LOG_ERR("Failed to open MGC handler: %d", mgc_fd);
+		btn_close(btn_fd);
+		imu_close(imu_fd);
+		return;
+	}
+	LOG_INF("MGC handler opened with fd=%d", mgc_fd);
+
 	esb_fd = esb_open(0);
 	if (esb_fd < 0) {
 		LOG_ERR("Failed to open ESB driver: %d", esb_fd);
+		mgc_close(mgc_fd);
 		btn_close(btn_fd);
 		imu_close(imu_fd);
 		return;
@@ -75,12 +88,16 @@ static void central_thread_entry(void *p1, void *p2, void *p3)
 	if (!fusion_state) {
 		LOG_ERR("Failed to initialize IMU fusion");
 		esb_close(esb_fd);
+		mgc_close(mgc_fd);
 		btn_close(btn_fd);
 		imu_close(imu_fd);
 		return;
 	}
 	LOG_INF("IMU fusion initialized (SLERP power: %.2f)",
 	        (double)fusion_config.slerp_power);
+
+	/* Initialize MGC ESB state */
+	memset(&mgc_esb_state, 0, sizeof(mgc3130_esb_state_t));
 
 	LOG_INF("All drivers opened successfully");
 
@@ -113,7 +130,7 @@ static void central_thread_entry(void *p1, void *p2, void *p3)
 			if (ret == 0 && fusion_output.valid) {
 				/* Log every 10th sample (10Hz) to reduce verbosity */
 				static uint32_t log_counter = 0;
-				if (++log_counter >= 10) {
+				if (++log_counter >= 1000) {
 					log_counter = 0;
 					LOG_INF("Quat[w:%.3f x:%.3f y:%.3f z:%.3f] "
 					        "Euler[R:%.1f° P:%.1f° Y:%.1f°]",
@@ -137,10 +154,32 @@ static void central_thread_entry(void *p1, void *p2, void *p3)
 			btn_state_raw = 0;
 		}
 
+		/* Poll MGC3130 for sensor data (processes internally) */
+		mgc3130_sensor_output_t mgc_sensor_output;
+		result = mgc_read(mgc_fd, &mgc_sensor_output, sizeof(mgc_sensor_output));
+		if (result < 0 && result != DRIVER_ERR_AGAIN) {
+			LOG_WRN("MGC read failed: %d", (int)result);
+		}
+
+		/* Get MGC state for ESB transmission */
+		result = mgc_ioctl(mgc_fd, MGC_IOCTL_GET_ESB_STATE, &mgc_esb_state);
+		if (result < 0) {
+			LOG_WRN("MGC ioctl GET_ESB_STATE failed: %d", (int)result);
+			/* Keep using previous state */
+		}
+
 		/* Build sensor data packet with quaternion */
 		sensor_packet.btn_state = btn_state_raw;
 
-		/* Get latest quaternion from fusion output (already computed in lines 91-134) */
+		/* Pack MGC state (touch + airwheel) */
+		sensor_packet.mgc_state = MGC_PACK_STATE(
+			mgc_esb_state.touch_electrodes,
+			mgc_esb_state.airwheel_active,
+			mgc_esb_state.airwheel_direction_cw,
+			mgc_esb_state.airwheel_velocity
+		);
+
+		/* Get latest quaternion from fusion output */
 		if (fusion_output.valid) {
 			/* Convert quaternion float to int16_t with scaling */
 			sensor_packet.quat_w = QUAT_FLOAT_TO_INT16(fusion_output.orientation.w);
@@ -148,7 +187,7 @@ static void central_thread_entry(void *p1, void *p2, void *p3)
 			sensor_packet.quat_y = QUAT_FLOAT_TO_INT16(fusion_output.orientation.y);
 			sensor_packet.quat_z = QUAT_FLOAT_TO_INT16(fusion_output.orientation.z);
 		} else {
-			/* Fusion not ready - send identity quaternion (no rotation) */
+			/* Fusion not ready - send identity quaternion */
 			sensor_packet.quat_w = QUAT_FLOAT_TO_INT16(1.0f);
 			sensor_packet.quat_x = 0;
 			sensor_packet.quat_y = 0;
@@ -182,6 +221,7 @@ static void central_thread_entry(void *p1, void *p2, void *p3)
 		imu_fusion_destroy(fusion_state);
 	}
 	esb_close(esb_fd);
+	mgc_close(mgc_fd);
 	btn_close(btn_fd);
 	imu_close(imu_fd);
 }

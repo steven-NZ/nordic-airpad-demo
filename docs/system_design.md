@@ -1,310 +1,152 @@
-# Zephyr RTOS System Design
-**Sensor-to-ESB Controller with Pattern Output**
+# Nordic Airpad Demo - System Design
+
+## Overview
+Wireless sensor node transmitting IMU orientation (quaternion), MGC gesture data, and button state via Nordic ESB at 100Hz.
+
+**Hardware:**
+- nRF52840 DK
+- ICM-42670-P IMU (I2C0) - quaternion fusion via RTQF algorithm
+- MGC3130 gesture sensor (I2C1) - 4-electrode touch + AirWheel
+- 3 buttons (GPIO interrupts)
+
+**Architecture:**
+- Single central thread (100Hz, 4KB stack)
+- POSIX-style driver API (open/read/write/ioctl)
+- 14-byte ESB packet: buttons + MGC state + quaternion
 
 ---
 
-## System Overview
-Embedded device that collects sensor inputs (IMU, capacitive touch, buttons), transmits data via Enhanced ShockBurst (ESB), and controls outputs (LEDs, vibration) based on received commands.
+## Hardware Configuration
 
----
+| Component | Bus/Pin | Config | Notes |
+|-----------|---------|--------|-------|
+| ICM-42670-P IMU | I2C0 (P0.26/27) | 100kHz, ±16g, ±2000dps, 100Hz | 6-DOF sensor |
+| MGC3130 Gesture | I2C1 (P0.30/31) | 100kHz, addr 0x42 | TS handshake (P0.29), MCLR (P0.28) |
+| Button 0/1/2 | P0.11/12/13 | Active-low, pull-up, interrupt | Simple state tracking |
+| ESB Radio | nRF radio | 2.4GHz, 1Mbps, 8dBm TX | 14-byte packet @ 100Hz |
 
-## Hardware Interface
-
-### Inputs
-- **IMU**: I2C interface
-- **Capacitive Touch Sensor**: I2C interface  
-- **3x Buttons**: GPIO (active low with pull-up)
-
-### Outputs
-- **LEDs**: SPI (addressable LEDs)
-- **Vibration Motor**: GPIO with PWM
-
-### Communication
-- **ESB Radio**: Bidirectional wireless link
+**Not Implemented:** LED/vibration output (TODO: central_thread.c:209)
 
 ---
 
 ## Architecture
 
-### Threading Model
+**Central Thread (Priority 5, 4KB stack, 10ms period):**
 ```
-┌─────────────────────────────────────────────┐
-│         Main Thread (Init + Idle)           │
-└─────────────────────────────────────────────┘
-                      │
-              ┌───────▼──────────┐
-              │  Central Thread  │  (Single unified thread)
-              │   (Priority 5)   │
-              └──────────────────┘
-                      │
-        ┌─────────────┼─────────────┐
-        │             │             │
-   ┌────▼────┐   ┌───▼────┐   ┌───▼─────┐
-   │   IMU   │   │  ESB   │   │ Output  │
-   │Handler  │   │Handler │   │(future) │
-   └─────────┘   └────────┘   └─────────┘
-
-        + Button ISRs (interrupt-based)
+Loop @ 100Hz:
+  1. imu_read() → raw accel/gyro
+  2. imu_fusion_update() → quaternion (RTQF algorithm)
+  3. btn_read() → 3-bit button state
+  4. mgc_read() → touch electrodes + airwheel
+  5. mgc_ioctl(GET_ESB_STATE) → pack to 2 bytes
+  6. Build sensor_data_t (14 bytes)
+  7. esb_write() → transmit packet
+  8. esb_read() → poll for RX (currently just logged)
 ```
 
-**Thread Priorities**: Central Thread (5)
-
-### Communication Flow
-```
-Central Thread (10ms period):
-  ├─ Read IMU (imu_handler_read)
-  ├─ Read Buttons (btn_handler_get_state)
-  ├─ Package & Send ESB (esb_handler_send)
-  └─ Receive & Process ESB (esb_handler_receive)
-
-Button ISRs ────────> button_state (shared variable)
-```
+**Button ISRs:** Update shared state variable (interrupt-driven)
+**Drivers:** POSIX-style API (open/close/read/write/ioctl), mutex-protected
 
 ---
 
-## Input System
+## Sensor Protocols
 
-### Input Processing Strategy
-- **Buttons**: GPIO interrupts on edge (both rising/falling)
-- **Cap Sensor**: I2C with interrupt pin (if available) or 20ms polling
-- **IMU**: I2C with data-ready interrupt or 100Hz polling
+### Buttons
+- GPIO interrupts (rising/falling edges)
+- Returns 3-bit state (1=pressed, 0=released)
+- No debouncing or complex state machine
 
-### Event Detection State Machine
-```
-States: IDLE → PRESSED → WAIT_DOUBLE → HOLD_DETECT → IDLE
-                    ↓          ↓            ↓
-Events:      SINGLE_CLICK  DOUBLE_CLICK   HOLD/LONG_HOLD
-```
+### MGC3130 Gesture Sensor (I2C, addr 0x42)
+**Protocol:** TS handshake required, 200μs delay after I2C transfer
+**Touch:** 4 electrodes (N/S/E/W), read from msg 0x91
+**AirWheel:** Counter 0-255 (CW increments, CCW decrements), velocity from delta
 
-**Timing Parameters**:
-- Debounce: 50ms
-- Double-click window: 400ms
-- Hold threshold: 1000ms
-- Long hold: 2000ms
+**2-Byte ESB Encoding:**
+- Byte 1: Touch bits [0-3]
+- Byte 2: Active flag, Direction (CW=1), Velocity [0-63]
 
-### Input Event Structure
+### IMU Fusion (RTQF Algorithm)
+**Input:** Accel + Gyro @ 100Hz
+**Process:** Predict (integrate gyro) → Measure (accel gravity) → Correct (SLERP blend, 2% power)
+**Output:** Quaternion (w,x,y,z) avoiding gimbal lock
+**Encoding:** int16_t = float × 32767
+
+---
+
+## ESB Packet Format
+
+**sensor_data_t (14 bytes packed):**
 ```c
-typedef struct {
-    uint8_t input_id;           // Button 0-2, Cap sensor
-    input_event_type_t type;    // SINGLE/DOUBLE/HOLD/RELEASE
-    uint64_t timestamp;
-} input_event_t;
+uint8_t  btn_state;    // 3 bits used
+uint16_t mgc_state;    // Byte1: touch[0-3], Byte2: airwheel flags+velocity
+int16_t  quat_w/x/y/z; // Quaternion × 32767 (decode: /32767.0)
 ```
 
-### Implementation
-- GPIO interrupts trigger work submission to system workqueue
-- State machines run in Input Thread context
-- Debouncing handled in software
-- Events pushed to `input_to_esb_queue`
+**ESB Config:** 2.4GHz, 1Mbps, 8dBm TX, 3 retries, ACK enabled, 32B max payload
 
 ---
 
-## ESB Communication Layer
-
-### Sensor Packet Format
-```c
-typedef struct {
-    uint32_t sequence_num;
-    uint8_t btn_state;          // 3 bits: btn1, btn2, btn3
-    uint32_t timestamp_ms;
-} __packed sensor_data_t;
-```
-
-### IMU Data
-IMU data is read every 10ms and logged to console (not transmitted via ESB)
-
-### Output Command Format
-Received ESB data is currently logged (LED/vibration control not implemented)
-
-### Central Thread Responsibilities
-1. Read and log IMU sensor data via `imu_handler_read()`
-2. Read button state via `btn_handler_get_state()`
-3. Package button data into `sensor_data_t`
-4. Transmit via `esb_handler_send()`
-5. Receive and log commands via `esb_handler_receive()`
-6. Period: 10ms (100Hz)
-
-### Configuration
-- Payload size: 32 bytes
-- TX power: 8dBm (maximum range)
-- Retry count: 3
-- ACK enabled
-- Bitrate: 1Mbps
-
----
-
-## Output System
-
-### Pattern Engine Architecture
-```c
-typedef enum {
-    PATTERN_OFF,
-    PATTERN_SOLID,
-    PATTERN_BLINK,
-    PATTERN_PULSE,
-    PATTERN_BREATHE,
-    PATTERN_CUSTOM
-} pattern_type_t;
-
-typedef struct {
-    pattern_type_t type;
-    uint32_t duration_ms;       // 0 = infinite
-    uint8_t intensity;          // 0-255
-    uint16_t period_ms;
-    uint8_t duty_percent;       // For BLINK
-    uint8_t custom_data[16];    // For CUSTOM patterns
-} pattern_config_t;
-```
-
-### LED Control (SPI)
-- Target: WS2812B or similar addressable LEDs
-- Update rate: 30-60 Hz (pattern dependent)
-- DMA transfer if available
-- Color buffer management in Output Thread
-
-### Vibration Control (PWM)
-- Frequency: 50Hz (20ms period typical)
-- Duty cycle: 0-100% for intensity control
-- Pattern timing via k_timer
-
-### Output Thread Operation
-1. Wait on `esb_to_output_queue` (timeout: 50ms)
-2. On new command: Load pattern configurations
-3. Update LED and vibration states based on active patterns
-4. Handle pattern completion and looping
-
----
-
-## Inter-Module Communication
-
-No message queues are used. The central thread directly calls hardware handler functions:
-- `imu_handler_read()` - Returns IMU data via output parameter
-- `btn_handler_get_state()` - Returns current button state
-- `esb_handler_send()` - Sends sensor packet via ESB
-- `esb_handler_receive()` - Polls for received ESB data
-
-Button state is shared via a static variable updated by GPIO interrupts.
-
----
-
-## Device Tree Configuration
-
-```dts
-/ {
-    buttons {
-        compatible = "gpio-keys";
-        button0: button_0 { gpios = <&gpio0 11 GPIO_ACTIVE_LOW>; };
-        button1: button_1 { gpios = <&gpio0 12 GPIO_ACTIVE_LOW>; };
-        button2: button_2 { gpios = <&gpio0 13 GPIO_ACTIVE_LOW>; };
-    };
-
-    vibrator {
-        compatible = "pwm-vibrator";
-        pwms = <&pwm0 0 PWM_MSEC(20) PWM_POLARITY_NORMAL>;
-    };
-    
-    leds_spi {
-        compatible = "worldsemi,ws2812-spi";
-        spi-max-frequency = <4000000>;
-        spi-one-frame = <0x70>;
-        spi-zero-frame = <0x40>;
-    };
-};
-
-&i2c0 {
-    imu: imu@68 { compatible = "invensense,mpu6050"; reg = <0x68>; };
-    capsense: capsense@5a { compatible = "azoteq,iqs263"; reg = <0x5a>; };
-};
-```
-
----
-
-## Source File Organization
+## Code Organization
 
 ```
 src/
-├── main.c                      # System initialization
-├── central_thread.c            # Main orchestration thread (10ms period)
+├── main.c, central_thread.c/h      # Init, 100Hz main loop
+├── drivers/driver_framework.h       # POSIX API (open/read/write/ioctl)
 ├── input/
-│   └── btn_handler.c           # Button interrupt handling
+│   ├── btn_handler.c/h              # Button GPIO interrupts
+│   └── mgc_handler.c/h              # MGC3130 I2C + TS protocol
 ├── sensors/
-│   └── imu_handler.c           # IMU I2C interface (hardware layer)
-└── comm/
-    └── esb_handler.c           # ESB hardware interface
+│   ├── imu_handler.c/h              # ICM-42670-P I2C
+│   ├── imu_fusion.c/h               # RTQF algorithm
+│   └── imu_math.c/h                 # Quaternion math
+└── comm/esb_handler.c/h             # ESB TX/RX
 ```
 
-**Hardware Layer**: `imu_handler`, `btn_handler`, `esb_handler` provide clean hardware interfaces
-**Application Layer**: `central_thread` orchestrates all hardware calls
+---
+
+## Device Tree (nrf52840dk_nrf52840.overlay)
+
+```dts
+&i2c0 {  /* P0.26/27, 100kHz */
+    icm42670p@68 {
+        accel-hz = <100>; accel-fs = <16>;
+        gyro-hz = <100>; gyro-fs = <2000>;
+    };
+};
+
+&i2c1 {  /* P0.30/31, 100kHz - MGC3130 @ 0x42 (no DT binding, SW driver) */
+};
+
+/ {
+    buttons {
+        button0/1/2 { gpios = <&gpio0 11/12/13 GPIO_ACTIVE_LOW>; };
+    };
+};
+```
 
 ---
 
-## Key Design Decisions
+## Important Notes
 
-### Why Single Central Thread?
-- Simpler architecture - no message queue overhead
-- Direct function calls reduce latency
-- ESB communication handled by RTOS (no separate thread needed)
-- Easier to reason about timing and execution order
-- Clean separation: Hardware handlers vs. Application orchestration
+**Threading:** Single central thread, no message queues - all drivers called directly
 
-### Why Interrupts for Buttons?
-- Lower latency (immediate response)
-- Reduced power consumption (no polling)
-- Cleaner code with Zephyr's GPIO callback API
-- Shared state variable is thread-safe for reads
+**MGC3130 Quirks:**
+- Requires TS handshake (TS LOW = data ready)
+- Mandatory 200μs delay after each I2C transfer
+- No Zephyr DT binding, uses raw I2C API
 
-### Why Hardware Handler Layer?
-- Clean abstraction of hardware interfaces
-- Easy to test and maintain
-- Reusable across different application threads
-- Separates concerns: hardware access vs. application logic
+**Not Implemented:**
+- LED/vibration output (TODO: central_thread.c:209)
+- Complex button events (double-click, hold)
+- Power optimizations (data-ready interrupts, sleep modes)
 
 ---
 
-## Timing Budget
+## Key Terms
 
-| Task | Period | Max Duration |
-|------|--------|--------------|
-| Central Thread Loop | 10ms | 8ms |
-| - IMU read | 10ms | 3ms |
-| - ESB TX | 10ms | 4ms |
-| - ESB RX check | 10ms | 1ms |
-| Button ISR | Event | <100μs |
-
----
-
-## Stack Sizes
-
-- Central Thread: 2KB
-- System Workqueue: 2KB
-- Main: 1KB
-
----
-
-## Power Considerations
-
-- Use GPIO interrupts (not polling) for buttons
-- IMU: Configure to low-power mode when static
-- ESB: Consider duty cycling radio if updates < 10Hz needed
-- LEDs: Use low brightness or pulse patterns to reduce current
-- Sleep mode: `pm_device_runtime_put()` on idle peripherals
-
----
-
-## Debug Strategy
-
-- Enable Zephyr logging: `LOG_MODULE_REGISTER()` per file
-- Input events: Log all state transitions
-- ESB: Log TX/RX packet counts and errors
-- Output: Log pattern changes
-- Use RTT or UART at 115200 baud
-
----
-
-## Future Enhancements
-
-- [ ] Battery monitoring (ADC)
-- [ ] Persistent config storage (NVS)
-- [ ] OTA firmware updates via ESB
-- [ ] Multi-device ESB network support
-- [ ] IMU gesture recognition (shake, tilt)
+- **RTQF**: Real-Time Quaternion Filter (6-DOF fusion, SLERP-based drift correction)
+- **ESB**: Enhanced ShockBurst (Nordic 2.4GHz protocol)
+- **MGC3130**: Microchip gesture sensor (I2C addr 0x42)
+- **TS**: Transfer Status (MGC3130 handshake line)
+- **Quaternion**: 4D rotation representation avoiding gimbal lock
+- **SLERP**: Spherical Linear Interpolation (quaternion blending)

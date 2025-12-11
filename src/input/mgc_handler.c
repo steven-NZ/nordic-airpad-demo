@@ -1,0 +1,1069 @@
+/*
+ * MGC3130 Gesture Sensor Driver
+ */
+
+#include <zephyr/kernel.h>
+#include <zephyr/device.h>
+#include <zephyr/drivers/i2c.h>
+#include <zephyr/drivers/gpio.h>
+#include <zephyr/logging/log.h>
+#include <zephyr/sys/util.h>
+#include <string.h>
+
+#include "mgc_handler.h"
+
+LOG_MODULE_REGISTER(mgc_handler, LOG_LEVEL_INF);
+
+/* MGC3130 I2C Configuration */
+#define MGC3130_I2C_ADDR  0x42
+
+/* GPIO Pin Definitions */
+#define MGC3130_MCLR_PIN  28  /* Reset pin (active low) */
+#define MGC3130_TS_PIN    29  /* Transfer Status pin */
+
+/* Timing Constants (from MGC3130 datasheet) */
+#define MGC3130_RESET_DELAY_MS          5    /* MCLR pulse width: min 5ms to reset device */
+#define MGC3130_BOOT_DELAY_MS           5    /* Boot time after reset: allow firmware init */
+#define MGC3130_POST_TRANSFER_DELAY_US  200  /* Mandatory I2C post-transfer delay (datasheet §7.1) */
+#define MGC3130_TS_TIMEOUT_MS           1    /* Transfer Status line ready timeout */
+#define MGC3130_INTER_COMMAND_DELAY_MS  1    /* Inter-command delay for device processing */
+
+/* Message Buffer Size */
+#define MGC3130_MSG_BUF_SIZE  256
+
+/* Driver Instance */
+typedef struct {
+	driver_instance_t base;
+	const struct device *i2c_dev;
+	const struct device *gpio_dev;
+	mgc3130_fw_version_t fw_version;
+	bool fw_version_valid;
+	mgc3130_config_t config;           /* Configuration state */
+	mgc3130_touch_state_t touch_state; /* Touch tracking state */
+	mgc3130_airwheel_state_t airwheel_state;  /* Airwheel tracking state */
+	mgc3130_esb_state_t esb_state;     /* State for ESB transmission */
+	int16_t last_airwheel_delta;       /* Last airwheel delta for velocity calc */
+	bool configured;                    /* Runtime parameters configured */
+} mgc_handler_instance_t;
+
+static mgc_handler_instance_t mgc_inst = {
+	.base = {
+		.state = DRIVER_STATE_CLOSED,
+		.flags = 0,
+	},
+	.fw_version_valid = false,
+};
+
+/* Helper Functions */
+
+/*
+ * Wait for TS line to go low (data ready)
+ * Returns: 0 on success, -ETIMEDOUT on timeout
+ */
+static int wait_for_ts_ready(uint32_t timeout_ms)
+{
+	int64_t end_time = k_uptime_get() + timeout_ms;
+	int value;
+
+	while (k_uptime_get() < end_time) {
+		value = gpio_pin_get(mgc_inst.gpio_dev, MGC3130_TS_PIN);
+		if (value < 0) {
+			LOG_ERR("Failed to read TS pin: %d", value);
+			return value;
+		}
+		if (value == 0) {
+			/* TS is low - data ready */
+			return 0;
+		}
+		k_sleep(K_MSEC(1));
+	}
+
+	LOG_WRN("TS line timeout");
+	return -ETIMEDOUT;
+}
+
+/*
+ * Read message from MGC3130 via I2C with TS protocol
+ * Returns: number of bytes read on success, negative error code on failure
+ */
+static int mgc3130_read_message(uint8_t *buf, size_t max_len)
+{
+	int ret;
+	uint8_t msg_size;
+
+	/* Wait for TS low (data ready) */
+	ret = wait_for_ts_ready(MGC3130_TS_TIMEOUT_MS);
+	if (ret < 0) {
+		return ret;
+	}
+
+	/* Read message via I2C (this asserts TS high via START condition) */
+	ret = i2c_read(mgc_inst.i2c_dev, buf, max_len, MGC3130_I2C_ADDR);
+	if (ret < 0) {
+		LOG_ERR("I2C read failed: %d", ret);
+		return ret;
+	}
+
+	/* I2C STOP condition releases TS line */
+
+	/* Parse message size from header (little-endian) */
+	msg_size = buf[0];
+
+	/* Mandatory 200μs wait after transfer */
+	k_usleep(MGC3130_POST_TRANSFER_DELAY_US);
+
+	/* Inter-command delay to allow device to process */
+	k_msleep(MGC3130_INTER_COMMAND_DELAY_MS);
+
+	LOG_DBG("Read message: size=%u, ID=0x%02X", msg_size, buf[3]);
+
+	return msg_size;
+}
+
+/*
+ * Write message to MGC3130 via I2C
+ * Returns: 0 on success, negative error code on failure
+ */
+static int mgc3130_write_message(const uint8_t *buf, size_t len)
+{
+	int ret;
+
+	/* Check TS line and clear any pending data before write */
+	ret = gpio_pin_get(mgc_inst.gpio_dev, MGC3130_TS_PIN);
+	if (ret < 0) {
+		LOG_ERR("Failed to read TS pin: %d", ret);
+		return ret;
+	}
+
+	/* If TS is low (device has pending data), read and discard it */
+	if (ret == 0) {
+		uint8_t discard_buf[256];
+		LOG_DBG("TS low before write, clearing pending data");
+		ret = i2c_read(mgc_inst.i2c_dev, discard_buf, sizeof(discard_buf), MGC3130_I2C_ADDR);
+		if (ret == 0) {
+			k_usleep(MGC3130_POST_TRANSFER_DELAY_US);
+		}
+	}
+
+	/* Inter-command delay before write */
+	k_msleep(MGC3130_INTER_COMMAND_DELAY_MS);
+
+	/* Write message via I2C */
+	ret = i2c_write(mgc_inst.i2c_dev, buf, len, MGC3130_I2C_ADDR);
+	if (ret < 0) {
+		LOG_ERR("I2C write failed: %d", ret);
+		return ret;
+	}
+
+	/* Mandatory 200μs wait after transfer (per datasheet) */
+	k_usleep(MGC3130_POST_TRANSFER_DELAY_US);
+
+	LOG_INF("Write message: len=%u, ret=%d", len, ret);
+	return 0;
+}
+
+/*
+ * Reset MGC3130 using MCLR pin
+ */
+static int mgc3130_reset(void)
+{
+	int ret;
+
+	LOG_INF("Resetting MGC3130...");
+
+	/* Assert MCLR low (reset active) */
+	ret = gpio_pin_set(mgc_inst.gpio_dev, MGC3130_MCLR_PIN, 0);
+	if (ret < 0) {
+		LOG_ERR("Failed to assert MCLR: %d", ret);
+		return ret;
+	}
+
+	k_msleep(MGC3130_RESET_DELAY_MS);
+
+	/* Release MCLR high (reset inactive) */
+	ret = gpio_pin_set(mgc_inst.gpio_dev, MGC3130_MCLR_PIN, 1);
+	if (ret < 0) {
+		LOG_ERR("Failed to release MCLR: %d", ret);
+		return ret;
+	}
+
+	/* Wait for MGC3130 to boot */
+	k_msleep(MGC3130_BOOT_DELAY_MS);
+
+	LOG_INF("MGC3130 reset complete");
+
+	return 0;
+}
+
+/*
+ * Set a runtime parameter on the MGC3130
+ *
+ * @param param_id: Runtime parameter ID (e.g., 0x0097)
+ * @param arg0: Argument 0
+ * @param arg1: Argument 1
+ * @return: 0 on success, negative error code on failure
+ */
+static int mgc3130_set_runtime_parameter(uint16_t param_id, uint32_t arg0, uint32_t arg1)
+{
+	uint8_t buf[MGC3130_MSG_BUF_SIZE];
+	mgc3130_set_runtime_param_msg_t msg;
+	mgc3130_system_status_msg_t *status;
+	int ret;
+	uint8_t msg_size;
+	uint8_t msg_id;
+
+	/* Build SET_RUNTIME_PARAMETER message */
+	msg.header.size = 0x10;
+	msg.header.flags = 0;
+	msg.header.seq = 0;
+	msg.header.id = MGC3130_MSG_SET_RUNTIME_PARAMETER;
+	msg.param_id = param_id;
+	msg.reserved = 0;
+	msg.arg0 = arg0;
+	msg.arg1 = arg1;
+
+	LOG_DBG("Setting runtime param 0x%04X: arg0=0x%08X, arg1=0x%08X",
+	        param_id, arg0, arg1);
+
+	/* Send message */
+	ret = mgc3130_write_message((uint8_t *)&msg, sizeof(msg));
+	if (ret < 0) {
+		LOG_ERR("Failed to write SET_RUNTIME_PARAMETER");
+		return ret;
+	}
+
+	/* Wait for System_Status response */
+	ret = mgc3130_read_message(buf, sizeof(buf));
+	if (ret < 0) {
+		LOG_ERR("Failed to read System_Status response");
+		return ret;
+	}
+
+	msg_size = buf[0];
+	msg_id = buf[3];
+
+	/* Validate response is System_Status */
+	if (msg_id != MGC3130_MSG_SYSTEM_STATUS) {
+		LOG_ERR("Unexpected response ID: 0x%02X (expected 0x15)", msg_id);
+		return -EINVAL;
+	}
+
+	/* Parse System_Status */
+	status = (mgc3130_system_status_msg_t *)buf;
+
+	if (status->error_code != 0) {
+		LOG_ERR("Parameter set failed with error code: 0x%04X", status->error_code);
+		return -EIO;
+	}
+
+	LOG_DBG("Runtime parameter 0x%04X set successfully", param_id);
+	return 0;
+}
+
+/*
+ * Configure MGC3130 for touch detection
+ * Enables touch detection and TouchInfo output
+ *
+ * @return: 0 on success, negative error code on failure
+ */
+static int mgc3130_configure_touch(void)
+{
+	int ret;
+
+	LOG_INF("Configuring MGC3130 for touch detection...");
+
+	/* Step 1: Enable touch detection (dspTouchConfig = 0x0097) */
+	ret = mgc3130_set_runtime_parameter(
+		MGC3130_PARAM_DSP_TOUCH_CONFIG,
+		MGC3130_TOUCH_CONFIG_ENABLE_ARG0,
+		MGC3130_TOUCH_CONFIG_ENABLE_ARG1
+	);
+	
+	if (ret < 0) {
+		LOG_ERR("Failed to enable touch detection: %d", ret);
+		return ret;
+	}
+
+	/* Step 2: Enable TouchInfo in data output (DataOutputEnableMask = 0x00A0) */
+	ret = mgc3130_set_runtime_parameter(
+		MGC3130_PARAM_DATA_OUTPUT_ENABLE,
+		MGC3130_OUTPUT_TOUCH_INFO,
+		MGC3130_OUTPUT_MASK_OVERWRITE
+	);
+	if (ret < 0) {
+		LOG_ERR("Failed to enable TouchInfo output: %d", ret);
+		return ret;
+	}
+
+	/* Update configuration state */
+	mgc_inst.config.touch_enabled = true;
+	mgc_inst.config.output_mask = MGC3130_OUTPUT_TOUCH_INFO;
+	mgc_inst.configured = true;
+
+	/* Initialize touch state */
+	mgc_inst.touch_state.current_touch = 0;
+	mgc_inst.touch_state.previous_touch = 0;
+	mgc_inst.touch_state.touch_active = false;
+	mgc_inst.touch_state.touch_start_time = 0;
+
+	LOG_INF("MGC3130 touch detection configured successfully");
+	return 0;
+}
+
+/*
+ * Configure MGC3130 for airwheel detection
+ * Enables airwheel detection and AirWheelInfo output
+ *
+ * @return: 0 on success, negative error code on failure
+ */
+static int mgc3130_configure_airwheel(void)
+{
+	int ret;
+
+	LOG_INF("Configuring MGC3130 for airwheel detection...");
+
+	/* Step 1: Enable airwheel detection */
+	ret = mgc3130_set_runtime_parameter(
+		MGC3130_PARAM_DSP_AIR_WHEEL_CONFIG,
+		MGC3130_AIRWHEEL_CONFIG_ENABLE_ARG0,
+		MGC3130_AIRWHEEL_CONFIG_ENABLE_ARG1  /* CRITICAL: must be 0x20 */
+	);
+
+	if (ret < 0) {
+		LOG_ERR("Failed to enable airwheel detection: %d", ret);
+		return ret;
+	}
+
+	/* Step 2: Enable AirWheelInfo in data output (both TouchInfo AND AirWheelInfo) */
+	ret = mgc3130_set_runtime_parameter(
+		MGC3130_PARAM_DATA_OUTPUT_ENABLE,
+		MGC3130_OUTPUT_TOUCH_INFO | MGC3130_OUTPUT_AIR_WHEEL_INFO,
+		MGC3130_OUTPUT_MASK_OVERWRITE
+	);
+	if (ret < 0) {
+		LOG_ERR("Failed to enable AirWheelInfo output: %d", ret);
+		return ret;
+	}
+
+	/* Update configuration state */
+	mgc_inst.config.airwheel_enabled = true;
+	mgc_inst.config.output_mask |= MGC3130_OUTPUT_AIR_WHEEL_INFO;
+
+	/* Initialize airwheel state */
+	mgc_inst.airwheel_state.current_counter = 0;
+	mgc_inst.airwheel_state.previous_counter = 0;
+	mgc_inst.airwheel_state.airwheel_valid = false;
+
+	LOG_INF("MGC3130 airwheel detection configured successfully");
+	return 0;
+}
+
+/*
+ * Read and parse Sensor_Data_Output message
+ *
+ * @param output: Output pointer for all sensor data (touch + airwheel + system_info)
+ * @return: 0 on success, negative error code on failure
+ */
+static int mgc3130_read_sensor_data(mgc3130_sensor_output_t *output)
+{
+	uint8_t buf[MGC3130_MSG_BUF_SIZE];
+	int ret;
+	uint8_t msg_size;
+	uint8_t msg_id;
+	uint16_t config_mask;
+	size_t offset;
+
+	/* Read message from sensor */
+	ret = mgc3130_read_message(buf, sizeof(buf));
+	if (ret < 0) {
+		return ret;
+	}
+
+	msg_size = buf[0];
+	msg_id = buf[3];
+
+	/* Validate message ID */
+	if (msg_id != MGC3130_MSG_SENSOR_DATA_OUTPUT) {
+		LOG_WRN("Unexpected message ID: 0x%02X (expected 0x91)", msg_id);
+		return -EINVAL;
+	}
+
+	/* Parse fixed header: size(2) + flags(1) + id(1) = 4 bytes minimum */
+	offset = 4;
+
+	/* Parse config mask (2 bytes) */
+	if (offset + 2 > msg_size) {
+		LOG_ERR("Message too short for config mask");
+		return -EINVAL;
+	}
+	config_mask = buf[offset] | (buf[offset + 1] << 8);
+	offset += 2;
+
+	/* Parse timestamp (1 byte) */
+	if (offset + 1 > msg_size) {
+		LOG_ERR("Message too short for timestamp");
+		return -EINVAL;
+	}
+	uint8_t timestamp = buf[offset];
+	offset += 1;
+
+	/* Parse system_info (1 byte) */
+	if (offset + 1 > msg_size) {
+		LOG_ERR("Message too short for system_info");
+		return -EINVAL;
+	}
+	uint8_t system_info = buf[offset];
+	offset += 1;
+
+	/* Initialize output structure */
+	if (output != NULL) {
+		memset(output, 0, sizeof(mgc3130_sensor_output_t));
+		output->system_info = system_info;
+	}
+
+	/* Parse variable fields based on config_mask */
+
+	/* TouchInfo field (4 bytes) - bit 2 */
+	if ((config_mask & MGC3130_OUTPUT_TOUCH_INFO) && output != NULL) {
+		if (offset + 4 > msg_size) {
+			LOG_ERR("Message too short for TouchInfo field");
+			return -EINVAL;
+		}
+
+		output->touch.touch_flags = buf[offset] | (buf[offset + 1] << 8);
+		output->touch.touch_counter = buf[offset + 2];
+		output->touch.reserved = buf[offset + 3];
+		offset += 4;
+	}
+
+	/* AirWheelInfo field (2 bytes) - bit 3 */
+	if ((config_mask & MGC3130_OUTPUT_AIR_WHEEL_INFO) && output != NULL) {
+		if (offset + 2 > msg_size) {
+			LOG_ERR("Message too short for AirWheelInfo field");
+			return -EINVAL;
+		}
+
+		output->airwheel.counter = buf[offset];
+		output->airwheel.reserved = buf[offset + 1];
+		offset += 2;
+	}
+
+	LOG_DBG("Sensor data parsed: config_mask=0x%04X, size=%u, system_info=0x%02X",
+	        config_mask, msg_size, system_info);
+	return 0;
+}
+
+/*
+ * Process touch state transitions and log touch cycles
+ * Detects and logs when touch starts (any electrode touched) and
+ * when touch ends (all electrodes released)
+ *
+ * @param touch_info: Current touch information from sensor
+ */
+static void mgc3130_process_touch_state(const mgc3130_touch_info_t *touch_info)
+{
+	uint8_t touch_electrodes;
+	uint32_t current_time;
+	uint32_t touch_duration;
+
+	/* Extract electrode touch bits (South, West, North, East) */
+	touch_electrodes = touch_info->touch_flags & MGC3130_TOUCH_ELECTRODE_MASK;
+
+	/* Update current touch state */
+	mgc_inst.touch_state.previous_touch = mgc_inst.touch_state.current_touch;
+	mgc_inst.touch_state.current_touch = touch_electrodes;
+	current_time = k_uptime_get_32();
+
+	/* Update ESB state with touch electrodes */
+	mgc_inst.esb_state.touch_electrodes = touch_electrodes;
+
+	/* Detect individual electrode changes and log current state */
+	uint8_t changed_electrodes = touch_electrodes ^ mgc_inst.touch_state.previous_touch;
+
+	if (changed_electrodes != 0) {
+		/* At least one electrode changed state - log current state of all electrodes */
+		LOG_INF("North: %u East: %u South: %u West: %u",
+		        (touch_electrodes & MGC3130_TOUCH_NORTH) ? 1 : 0,
+		        (touch_electrodes & MGC3130_TOUCH_EAST)  ? 1 : 0,
+		        (touch_electrodes & MGC3130_TOUCH_SOUTH) ? 1 : 0,
+		        (touch_electrodes & MGC3130_TOUCH_WEST)  ? 1 : 0);
+	}
+}
+
+/*
+ * Process airwheel state transitions and log rotation
+ * Detects counter changes and determines rotation direction
+ * Handles counter wraparound (0-255)
+ *
+ * @param output: Current sensor data including airwheel info and system_info
+ */
+static void mgc3130_process_airwheel_state(const mgc3130_sensor_output_t *output)
+{
+	uint8_t current_counter = output->airwheel.counter;
+	uint8_t previous_counter = mgc_inst.airwheel_state.previous_counter;
+	bool airwheel_active = (output->system_info & MGC3130_SYSINFO_AIRWHEEL_VALID) != 0;
+	static bool first_sample = true;
+
+	/* Update previous counter */
+	mgc_inst.airwheel_state.previous_counter = current_counter;
+
+	/* Check for valid-to-invalid or invalid-to-valid transition */
+	if (airwheel_active != mgc_inst.airwheel_state.airwheel_valid) {
+		mgc_inst.airwheel_state.airwheel_valid = airwheel_active;
+		if (airwheel_active) {
+			LOG_INF("Airwheel: ACTIVE");
+			first_sample = true;  /* Reset on activation */
+		} else {
+			LOG_INF("Airwheel: INACTIVE");
+		}
+		/* Update ESB state */
+		mgc_inst.esb_state.airwheel_active = airwheel_active;
+		if (!airwheel_active) {
+			/* Reset velocity when airwheel becomes inactive */
+			mgc_inst.esb_state.airwheel_velocity = 0;
+		}
+	}
+
+	/* Only process counter changes if airwheel is valid */
+	if (!airwheel_active) {
+		return;
+	}
+
+	/* Skip first sample to establish baseline */
+	if (first_sample) {
+		first_sample = false;
+		return;
+	}
+
+	/* Skip if counter hasn't changed */
+	if (current_counter == previous_counter) {
+		return;
+	}
+
+	/* Determine direction and handle wraparound */
+	int16_t delta = (int16_t)current_counter - (int16_t)previous_counter;
+	const char *direction;
+
+	/* Handle wraparound: if delta magnitude > 128, counter wrapped */
+	if (delta > 128) {
+		/* Wrapped backward: e.g., 250 -> 5 is actually CCW */
+		delta = delta - 256;
+		direction = "CCW";
+	} else if (delta < -128) {
+		/* Wrapped forward: e.g., 5 -> 250 is actually CW */
+		delta = delta + 256;
+		direction = "CW";
+	} else {
+		/* No wraparound */
+		direction = (delta > 0) ? "CW" : "CCW";
+	}
+
+	/* Calculate velocity level from absolute delta (0-63) */
+	int abs_delta = (delta > 0) ? delta : -delta;
+	uint8_t velocity_level;
+
+	/* Cap velocity at 63 (6-bit max) */
+	if (abs_delta > 63) {
+		velocity_level = 63;
+	} else {
+		velocity_level = (uint8_t)abs_delta;
+	}
+
+	/* Update ESB state */
+	mgc_inst.esb_state.airwheel_velocity = velocity_level;
+	mgc_inst.esb_state.airwheel_direction_cw = (delta > 0);
+	mgc_inst.last_airwheel_delta = delta;
+
+	/* Log counter, delta, and velocity for testing */
+	LOG_INF("Airwheel: %s | Counter: %3u | Delta: %3d | Velocity: %u",
+	        direction, current_counter, delta, velocity_level);
+}
+
+/*
+ * Parse firmware version string to extract individual fields
+ * Format: "1.3.14;p:HillstarV01;x:HTIS_GS;DSP:ID9000r2963;i:B;f:22500;nMsg;s:Rel_1_3;t:2013/11/08 13:03:08;..."
+ */
+static void parse_fw_version_string(mgc3130_fw_version_t *ver)
+{
+	char *str = ver->version_string;
+	char *field_start;
+	char *field_end;
+	size_t field_len;
+
+	/* Initialize all fields to empty strings */
+	ver->library_version[0] = '\0';
+	ver->platform[0] = '\0';
+	ver->colibri_version[0] = '\0';
+	ver->build_time[0] = '\0';
+
+	/* Extract GestIC Library Version (everything before first semicolon) */
+	field_end = strchr(str, ';');
+	if (field_end != NULL) {
+		field_len = field_end - str;
+		if (field_len < sizeof(ver->library_version)) {
+			memcpy(ver->library_version, str, field_len);
+			ver->library_version[field_len] = '\0';
+		}
+	} else {
+		/* No semicolon found, use entire string */
+		strncpy(ver->library_version, str, sizeof(ver->library_version) - 1);
+		return;
+	}
+
+	/* Extract Platform (p:) */
+	field_start = strstr(str, MGC3130_FW_FIELD_PLATFORM);
+	if (field_start != NULL) {
+		field_start += strlen(MGC3130_FW_FIELD_PLATFORM);
+		field_end = strchr(field_start, ';');
+		if (field_end != NULL) {
+			field_len = field_end - field_start;
+		} else {
+			field_len = strlen(field_start);
+		}
+		if (field_len < sizeof(ver->platform)) {
+			memcpy(ver->platform, field_start, field_len);
+			ver->platform[field_len] = '\0';
+		}
+	}
+
+	/* Extract Colibri Suite Version (DSP:) */
+	field_start = strstr(str, MGC3130_FW_FIELD_DSP);
+	if (field_start != NULL) {
+		field_start += strlen(MGC3130_FW_FIELD_DSP);
+		field_end = strchr(field_start, ';');
+		if (field_end != NULL) {
+			field_len = field_end - field_start;
+		} else {
+			field_len = strlen(field_start);
+		}
+		if (field_len < sizeof(ver->colibri_version)) {
+			memcpy(ver->colibri_version, field_start, field_len);
+			ver->colibri_version[field_len] = '\0';
+		}
+	}
+
+	/* Extract Build Time (t:) */
+	field_start = strstr(str, MGC3130_FW_FIELD_BUILD_TIME);
+	if (field_start != NULL) {
+		field_start += strlen(MGC3130_FW_FIELD_BUILD_TIME);
+		field_end = strchr(field_start, ';');
+		if (field_end != NULL) {
+			field_len = field_end - field_start;
+		} else {
+			field_len = strlen(field_start);
+		}
+		if (field_len < sizeof(ver->build_time)) {
+			memcpy(ver->build_time, field_start, field_len);
+			ver->build_time[field_len] = '\0';
+		}
+	}
+}
+
+/*
+ * Get firmware version from MGC3130
+ * The device sends FW_Version_Info automatically at startup,
+ * or we can request it using Request_Message
+ */
+static int mgc3130_get_fw_version(mgc3130_fw_version_t *ver)
+{
+	uint8_t buf[MGC3130_MSG_BUF_SIZE];
+	int ret;
+	uint8_t msg_id;
+	uint8_t msg_size;
+	size_t payload_offset;
+	size_t payload_len;
+
+	/* Wait for automatic FW_Version_Info message after reset */
+	bool automatic_fw = false;
+	ret = wait_for_ts_ready(MGC3130_TS_TIMEOUT_MS);
+	if (ret < 0) {
+		LOG_INF("No automatic FW version, sending request...");
+
+		/* Request Message to request Fw_Version_Info */
+		const mgc3130_request_msg_t request_fw_version = {
+			.header = {
+				.size = 0x0C,                          /* 12 bytes total */
+				.flags = 0x00,
+				.seq = 0x00,
+				.id = MGC3130_MSG_REQUEST_MESSAGE      /* 0x06 */
+			},
+			.requested_msg_id = MGC3130_MSG_FW_VERSION_INFO,  /* 0x83 */
+			.reserved = {0},
+			.param = 0
+		};
+
+		/* Send Request_Message to request FW version */
+		ret = mgc3130_write_message((const uint8_t *)&request_fw_version, sizeof(request_fw_version));
+		if (ret < 0) {
+			LOG_ERR("Failed to send request message");
+			return ret;
+		}
+
+		/* Wait for response */
+		ret = wait_for_ts_ready(MGC3130_TS_TIMEOUT_MS);
+		if (ret < 0) {
+			LOG_ERR("No response to request message");
+			return ret;
+		}
+	} else {
+		automatic_fw = true;
+	}
+
+	/* Read FW_Version_Info message */
+	ret = mgc3130_read_message(buf, sizeof(buf));
+	if (ret < 0) {
+		LOG_ERR("Failed to read FW version message");
+		return ret;
+	}
+
+	msg_size = buf[0];
+	msg_id = buf[3];
+
+	/* Validate message ID */
+	if (msg_id != MGC3130_MSG_FW_VERSION_INFO) {
+		LOG_ERR("Unexpected message ID: 0x%02X (expected 0x83)", msg_id);
+		return -EINVAL;
+	}
+
+	LOG_INF("Received FW_Version_Info message (size=%u)", msg_size);
+
+	/* Extract payload - starts after header
+	 * Header format: Size(2) + Flags(1) + ID(1) = 4 bytes minimum
+	 * Actual message may have additional header bytes
+	 */
+	payload_offset = 4;  /* Skip standard 4-byte header */
+
+	/* Find start of version string in payload (starts with a digit 0-9) */
+	while (payload_offset < msg_size && payload_offset < sizeof(buf)) {
+		/* Version string starts with a digit (e.g., "1.0.0" or "1.3.14") */
+		if (buf[payload_offset] >= '0' && buf[payload_offset] <= '9') {
+			break;
+		}
+		payload_offset++;
+	}
+
+	if (payload_offset >= msg_size) {
+		LOG_ERR("No version string found in message");
+		return -EINVAL;
+	}
+
+	payload_len = msg_size - payload_offset;
+	if (payload_len > MGC3130_FW_VERSION_MAX_LEN - 1) {
+		payload_len = MGC3130_FW_VERSION_MAX_LEN - 1;
+	}
+
+	/* Copy ASCII string to version structure */
+	memcpy(ver->version_string, &buf[payload_offset], payload_len);
+	ver->version_string[payload_len] = '\0';  /* Null-terminate */
+	ver->length = payload_len;
+
+	/* Parse the version string into structured fields */
+	parse_fw_version_string(ver);
+
+	LOG_INF("GestIC Library Version: %s", ver->library_version);
+	LOG_INF("Platform: %s", ver->platform);
+	LOG_INF("Colibri Suite Version: %s", ver->colibri_version);
+	if (ver->build_time[0] != '\0') {
+		LOG_INF("Build Time: %s", ver->build_time);
+	}
+
+	/* Handle automatic vs requested firmware version differently */
+	if (automatic_fw) {
+		/* Automatic FW version - check for and clear any pending messages */
+		LOG_DBG("Automatic FW version - clearing any pending messages");
+
+		/* Poll for pending messages and read them */
+		for (int i = 0; i < 3; i++) {
+			k_msleep(20);  /* Wait for device to prepare data */
+			ret = gpio_pin_get(mgc_inst.gpio_dev, MGC3130_TS_PIN);
+			if (ret == 0) {
+				/* TS low - data pending, read it */
+				ret = mgc3130_read_message(buf, sizeof(buf));
+				if (ret > 0) {
+					LOG_DBG("Cleared pending message 0x%02X after automatic FW", buf[3]);
+				}
+			} else {
+				/* TS high - no pending data */
+				break;
+			}
+		}
+
+		/* Extra settling time */
+		k_msleep(20);
+	} else {
+		/* Requested FW version - read System_Status response */
+		ret = wait_for_ts_ready(MGC3130_TS_TIMEOUT_MS);
+		if (ret == 0) {
+			ret = mgc3130_read_message(buf, sizeof(buf));
+			if (ret > 0) {
+				msg_id = buf[3];
+				if (msg_id == MGC3130_MSG_SYSTEM_STATUS) {
+					LOG_DBG("Received System_Status after FW request");
+				} else {
+					LOG_WRN("Expected System_Status, got 0x%02X", msg_id);
+				}
+			}
+		}
+	}
+
+	return 0;
+}
+
+/* Driver API Implementation */
+
+driver_fd_t mgc_open(void)
+{
+	DRIVER_LOCK(&mgc_inst.base);
+
+	if (mgc_inst.base.state == DRIVER_STATE_OPEN) {
+		LOG_WRN("Driver already open");
+		DRIVER_UNLOCK(&mgc_inst.base);
+		return -EBUSY;
+	}
+
+	if (mgc_inst.base.state == DRIVER_STATE_ERROR) {
+		LOG_ERR("Driver in error state");
+		DRIVER_UNLOCK(&mgc_inst.base);
+		return -EIO;
+	}
+
+	mgc_inst.base.state = DRIVER_STATE_OPEN;
+
+	DRIVER_UNLOCK(&mgc_inst.base);
+
+	LOG_INF("MGC handler opened");
+	return 0;
+}
+
+int mgc_close(driver_fd_t fd)
+{
+	if (mgc_inst.base.state != DRIVER_STATE_OPEN) {
+		LOG_ERR("Driver not open");
+		return -EINVAL;
+	}
+
+	DRIVER_LOCK(&mgc_inst.base);
+
+	mgc_inst.base.state = DRIVER_STATE_CLOSED;
+
+	DRIVER_UNLOCK(&mgc_inst.base);
+
+	LOG_INF("MGC handler closed");
+	return 0;
+}
+
+ssize_t mgc_read(driver_fd_t fd, void *buf, size_t count)
+{
+	int ret;
+	int ts_value;
+	mgc3130_sensor_output_t sensor_output;
+
+	if (mgc_inst.base.state != DRIVER_STATE_OPEN) {
+		LOG_ERR("Driver not open");
+		return -EINVAL;
+	}
+
+	DRIVER_LOCK(&mgc_inst.base);
+
+	/* Non-blocking check: Read TS pin */
+	ts_value = gpio_pin_get(mgc_inst.gpio_dev, MGC3130_TS_PIN);
+	if (ts_value < 0) {
+		LOG_ERR("Failed to read TS pin: %d", ts_value);
+		DRIVER_UNLOCK(&mgc_inst.base);
+		return ts_value;
+	}
+
+	/* If TS is high - no data available */
+	if (ts_value != 0) {
+		DRIVER_UNLOCK(&mgc_inst.base);
+		return DRIVER_ERR_AGAIN;
+	}
+
+	/* TS is low - data ready, read sensor data */
+	ret = mgc3130_read_sensor_data(&sensor_output);
+	if (ret < 0) {
+		LOG_WRN("Failed to read sensor data: %d", ret);
+		DRIVER_UNLOCK(&mgc_inst.base);
+		return ret;
+	}
+
+	/* Process touch state transitions and log */
+	mgc3130_process_touch_state(&sensor_output.touch);
+
+	/* Process airwheel state transitions and log */
+	mgc3130_process_airwheel_state(&sensor_output);
+
+	/* Copy sensor_output to user buffer if provided */
+	if (buf != NULL) {
+		if (count >= sizeof(mgc3130_sensor_output_t)) {
+			/* Full output requested */
+			memcpy(buf, &sensor_output, sizeof(mgc3130_sensor_output_t));
+		} else if (count >= sizeof(mgc3130_touch_info_t)) {
+			/* Legacy: only touch info requested */
+			memcpy(buf, &sensor_output.touch, sizeof(mgc3130_touch_info_t));
+		}
+	}
+
+	DRIVER_UNLOCK(&mgc_inst.base);
+
+	return sizeof(mgc3130_sensor_output_t);
+}
+
+int mgc_ioctl(driver_fd_t fd, unsigned int cmd, void *arg)
+{
+	int ret = 0;
+
+	if (mgc_inst.base.state != DRIVER_STATE_OPEN) {
+		LOG_ERR("Driver not open");
+		return -EINVAL;
+	}
+
+	DRIVER_LOCK(&mgc_inst.base);
+
+	switch (cmd) {
+	case MGC_IOCTL_GET_FW_VERSION:
+		if (arg == NULL) {
+			ret = -EINVAL;
+			break;
+		}
+
+		if (mgc_inst.fw_version_valid) {
+			/* Return cached version */
+			memcpy(arg, &mgc_inst.fw_version, sizeof(mgc3130_fw_version_t));
+		} else {
+			/* Read version from device */
+			ret = mgc3130_get_fw_version((mgc3130_fw_version_t *)arg);
+			if (ret == 0) {
+				/* Cache the version */
+				memcpy(&mgc_inst.fw_version, arg, sizeof(mgc3130_fw_version_t));
+				mgc_inst.fw_version_valid = true;
+			}
+		}
+		break;
+
+	case MGC_IOCTL_CONFIGURE_TOUCH:
+		/* Manually trigger touch configuration */
+		ret = mgc3130_configure_touch();
+		break;
+
+	case MGC_IOCTL_READ_SENSOR_DATA:
+		/* Single sensor data read */
+		if (arg == NULL) {
+			ret = -EINVAL;
+			break;
+		}
+		ret = mgc3130_read_sensor_data((mgc3130_touch_info_t *)arg);
+		break;
+
+	case MGC_IOCTL_GET_ESB_STATE:
+		if (arg == NULL) {
+			ret = -EINVAL;
+			break;
+		}
+		/* Return a snapshot of current ESB state */
+		memcpy(arg, &mgc_inst.esb_state, sizeof(mgc3130_esb_state_t));
+		ret = 0;
+		break;
+
+	default:
+		LOG_WRN("Unknown ioctl command: 0x%02X", cmd);
+		ret = -EINVAL;
+		break;
+	}
+
+	DRIVER_UNLOCK(&mgc_inst.base);
+
+	return ret;
+}
+
+/* Driver Initialization */
+
+static int mgc_init(void)
+{
+	int ret;
+
+	LOG_INF("Initializing MGC3130 handler...");
+
+	/* Initialize mutex */
+	k_mutex_init(&mgc_inst.base.lock);
+
+	/* Initialize ESB state */
+	memset(&mgc_inst.esb_state, 0, sizeof(mgc3130_esb_state_t));
+	mgc_inst.last_airwheel_delta = 0;
+
+	/* Get I2C1 device */
+	mgc_inst.i2c_dev = DEVICE_DT_GET(DT_NODELABEL(i2c1));
+	if (!device_is_ready(mgc_inst.i2c_dev)) {
+		LOG_ERR("I2C1 device not ready");
+		return -ENODEV;
+	}
+	LOG_INF("I2C1 device ready");
+
+	/* Get GPIO device */
+	mgc_inst.gpio_dev = DEVICE_DT_GET(DT_NODELABEL(gpio0));
+	if (!device_is_ready(mgc_inst.gpio_dev)) {
+		LOG_ERR("GPIO device not ready");
+		return -ENODEV;
+	}
+	LOG_INF("GPIO device ready");
+
+	/* Configure MCLR pin as output (initially high - reset inactive) */
+	ret = gpio_pin_configure(mgc_inst.gpio_dev, MGC3130_MCLR_PIN,
+	                         GPIO_OUTPUT_ACTIVE | GPIO_ACTIVE_HIGH);
+	if (ret < 0) {
+		LOG_ERR("Failed to configure MCLR pin: %d", ret);
+		return ret;
+	}
+
+	/* Configure TS pin as input */
+	ret = gpio_pin_configure(mgc_inst.gpio_dev, MGC3130_TS_PIN,
+	                         GPIO_INPUT);
+	if (ret < 0) {
+		LOG_ERR("Failed to configure TS pin: %d", ret);
+		return ret;
+	}
+
+	LOG_INF("GPIO pins configured (MCLR=%d, TS=%d)", MGC3130_MCLR_PIN, MGC3130_TS_PIN);
+
+	/* Perform reset sequence */
+	ret = mgc3130_reset();
+	if (ret < 0) {
+		LOG_ERR("Reset failed: %d", ret);
+		return ret;
+	}
+
+	/* Read firmware version */
+	ret = mgc3130_get_fw_version(&mgc_inst.fw_version);
+	if (ret == 0) {
+		mgc_inst.fw_version_valid = true;
+		LOG_INF("Firmware version read successful");
+	} else {
+		LOG_WRN("Could not read firmware version (will retry on first ioctl)");
+		/* Don't fail initialization - we can retry later */
+	}
+
+	/* Configure touch detection */
+	ret = mgc3130_configure_touch();
+	if (ret < 0) {
+		LOG_ERR("Failed to configure touch detection: %d", ret);
+		mgc_inst.configured = false;
+		/* Don't fail initialization - allow manual configuration via ioctl */
+	} else {
+		mgc_inst.configured = true;
+	}
+
+	/* Configure airwheel detection alongside touch */
+	ret = mgc3130_configure_airwheel();
+	if (ret < 0) {
+		LOG_ERR("Failed to configure airwheel detection: %d", ret);
+		mgc_inst.config.airwheel_enabled = false;
+	}
+
+	/* State remains DRIVER_STATE_CLOSED - application must call open() */
+
+	LOG_INF("MGC3130 handler initialized successfully");
+
+	return 0;
+}
+
+SYS_INIT(mgc_init, APPLICATION, 92);
