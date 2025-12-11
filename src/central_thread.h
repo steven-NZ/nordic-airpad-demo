@@ -12,7 +12,7 @@
  *
  * Sets up the main orchestration thread that coordinates:
  * - IMU sensor reading
- # - MGC sensor reading
+ * - MGC sensor reading
  * - Button state reading
  * - ESB communication (TX/RX)
  * - Output control (LED, vibration)
