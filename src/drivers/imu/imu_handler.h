@@ -6,7 +6,7 @@
 #define IMU_HANDLER_H_
 
 #include <stdint.h>
-#include "../drivers/driver_framework.h"
+#include "../driver_framework.h"
 
 /* IMU sensor data structure
  * All values in SI units:

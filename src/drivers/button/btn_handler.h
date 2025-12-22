@@ -6,7 +6,7 @@
 #define BTN_HANDLER_H_
 
 #include <stdint.h>
-#include "../drivers/driver_framework.h"
+#include "../driver_framework.h"
 
 /* Button state structure */
 typedef struct {
