@@ -9,6 +9,7 @@
 #include "../drivers/button/btn_handler.h"
 #include "../drivers/gesture/mgc_handler.h"
 #include "../drivers/imu/imu_handler.h"
+#include "../drivers/vibration/vib_handler.h"
 #include "../middleware/sensor_fusion/imu_fusion.h"
 #include "../middleware/sensor_fusion/imu_math.h"
 #include "../drivers/driver_framework.h"
@@ -26,9 +27,13 @@ static driver_fd_t imu_fd = DRIVER_FD_INVALID;
 static driver_fd_t btn_fd = DRIVER_FD_INVALID;
 static driver_fd_t mgc_fd = DRIVER_FD_INVALID;
 static driver_fd_t esb_fd = DRIVER_FD_INVALID;
+static driver_fd_t vib_fd = DRIVER_FD_INVALID;
 
 /* IMU fusion state */
 static imu_fusion_state_t *fusion_state = NULL;
+
+/* Response data for ESB ACK payload */
+static response_data_t response_data;
 
 /* Central thread entry point */
 static void central_thread_entry(void *p1, void *p2, void *p3)
@@ -76,6 +81,17 @@ static void central_thread_entry(void *p1, void *p2, void *p3)
 	}
 	LOG_INF("ESB driver opened with fd=%d", esb_fd);
 
+	vib_fd = vib_open(0);
+	if (vib_fd < 0) {
+		LOG_ERR("Failed to open vibration driver: %d", vib_fd);
+		esb_close(esb_fd);
+		mgc_close(mgc_fd);
+		btn_close(btn_fd);
+		imu_close(imu_fd);
+		return;
+	}
+	LOG_INF("Vibration driver opened with fd=%d", vib_fd);
+
 	/* Initialize IMU fusion */
 	imu_fusion_config_t fusion_config = {
 		.slerp_power = 0.02f,      /* 2% correction per sample */
@@ -87,6 +103,7 @@ static void central_thread_entry(void *p1, void *p2, void *p3)
 	fusion_state = imu_fusion_init(&fusion_config);
 	if (!fusion_state) {
 		LOG_ERR("Failed to initialize IMU fusion");
+		vib_close(vib_fd);
 		esb_close(esb_fd);
 		mgc_close(mgc_fd);
 		btn_close(btn_fd);
@@ -98,6 +115,16 @@ static void central_thread_entry(void *p1, void *p2, void *p3)
 
 	/* Initialize MGC ESB state */
 	memset(&mgc_esb_state, 0, sizeof(mgc3130_esb_state_t));
+
+	/* Initialize response data */
+	memset(&response_data, 0, sizeof(response_data_t));
+
+	/* Enable ACK payload transmission */
+	bool enable_ack = true;
+	result = esb_ioctl(esb_fd, ESB_IOCTL_ENABLE_ACK_PL, &enable_ack);
+	if (result < 0) {
+		LOG_ERR("Failed to enable ACK payload: %d", (int)result);
+	}
 
 	LOG_INF("All drivers opened successfully");
 
@@ -200,13 +227,39 @@ static void central_thread_entry(void *p1, void *p2, void *p3)
 			LOG_ERR("ESB write failed: %d", (int)result);
 		}
 
-		/* Check for received ESB data */
+		/* Check for received ESB data (commands from receiver) */
 		result = esb_read(esb_fd, rx_buf, sizeof(rx_buf));
 		if (result > 0) {
-			/* Process received data */
-			LOG_INF("Received ESB data, len: %d", (int)result);
-			LOG_HEXDUMP_INF(rx_buf, result, "RX:");
-			/* TODO: Parse and handle LED/vibration commands when implemented */
+			/* Process received command data */
+			LOG_INF("Received ESB command, len: %d", (int)result);
+
+			/* Expect response_data_t structure */
+			if (result >= sizeof(response_data_t)) {
+				response_data_t *cmd = (response_data_t *)rx_buf;
+
+				/* Update vibration state based on command */
+				vib_control_t vib_ctrl;
+				vib_ctrl.enable = cmd->vibration_enable;
+				vib_ctrl.intensity = 255;  /* Full intensity when enabled */
+
+				ssize_t vib_result = vib_write(vib_fd, &vib_ctrl, sizeof(vib_ctrl));
+				if (vib_result < 0) {
+					LOG_ERR("Failed to update vibration: %d", (int)vib_result);
+				} else {
+					LOG_INF("Vibration %s", vib_ctrl.enable ? "ON" : "OFF");
+				}
+
+				/* Update response data to echo back current state */
+				response_data.vibration_enable = vib_ctrl.enable;
+
+				/* Update ESB ACK payload with current state */
+				result = esb_ioctl(esb_fd, ESB_IOCTL_SET_ACK_PAYLOAD, &response_data);
+				if (result < 0) {
+					LOG_ERR("Failed to set ACK payload: %d", (int)result);
+				}
+			} else {
+				LOG_WRN("Received incomplete command (len=%d)", (int)result);
+			}
 		} else if (result < 0 && result != DRIVER_ERR_AGAIN) {
 			/* Log errors other than "no data available" */
 			LOG_WRN("ESB read error: %d", (int)result);
@@ -220,6 +273,7 @@ static void central_thread_entry(void *p1, void *p2, void *p3)
 	if (fusion_state) {
 		imu_fusion_destroy(fusion_state);
 	}
+	vib_close(vib_fd);
 	esb_close(esb_fd);
 	mgc_close(mgc_fd);
 	btn_close(btn_fd);

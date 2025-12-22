@@ -20,6 +20,12 @@ typedef struct {
 	int16_t quat_z;         /* Quaternion z component (scaled by 32767) */
 } __attribute__((packed)) sensor_data_t;
 
+/* Response data structure (sent back in ACK payload) */
+typedef struct {
+	uint8_t vibration_enable;      /* 0=off, 1=on */
+	uint8_t reserved[7];           /* Reserved for future expansion */
+} __attribute__((packed)) response_data_t;
+
 /* Quaternion conversion constants
  * Quaternion components are normalized floats in range [-1.0, 1.0]
  * Scale factor: INT16_MAX (32767) for maximum resolution
@@ -65,6 +71,8 @@ typedef struct {
 #define ESB_IOCTL_GET_TX_FAILED     0x3007  /* Get TX failed count (uint32_t*) */
 #define ESB_IOCTL_GET_RX_COUNT      0x3008  /* Get RX packet count (uint32_t*) */
 #define ESB_IOCTL_RESET_STATS       0x3009  /* Reset statistics counters */
+#define ESB_IOCTL_SET_ACK_PAYLOAD   0x300A  /* Set ACK payload (response_data_t*) */
+#define ESB_IOCTL_ENABLE_ACK_PL     0x300B  /* Enable ACK payload transmission (bool*) */
 
 /* ESB statistics structure */
 typedef struct {

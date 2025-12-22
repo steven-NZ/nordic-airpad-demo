@@ -40,6 +40,20 @@
 			bias-pull-up;
 		};
 	};
+
+	/* PWM0 Pin Configuration for Vibration Motor */
+	pwm0_default: pwm0_default {
+		group1 {
+			psels = <NRF_PSEL(PWM_OUT0, 1, 10)>;  /* P1.10 */
+		};
+	};
+
+	pwm0_sleep: pwm0_sleep {
+		group1 {
+			psels = <NRF_PSEL(PWM_OUT0, 1, 10)>;
+			low-power-enable;
+		};
+	};
 };
 
 /* I2C Bus Configuration */
@@ -73,4 +87,12 @@
 	pinctrl-1 = <&i2c1_sleep>;
 	pinctrl-names = "default", "sleep";
 	clock-frequency = <I2C_BITRATE_STANDARD>;  /* 100 kHz */
+};
+
+/* PWM0 Configuration for Vibration Motor */
+&pwm0 {
+	status = "okay";
+	pinctrl-0 = <&pwm0_default>;
+	pinctrl-1 = <&pwm0_sleep>;
+	pinctrl-names = "default", "sleep";
 };

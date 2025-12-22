@@ -20,6 +20,9 @@ typedef struct {
 	driver_instance_t base;         /* Base driver instance (must be first) */
 	struct esb_payload rx_payload;  /* RX buffer */
 	struct esb_payload tx_payload;  /* TX buffer */
+	struct esb_payload ack_payload; /* ACK payload buffer */
+	response_data_t response_data;  /* Response data structure */
+	bool ack_payload_enabled;       /* Enable ACK payload transmission */
 	esb_stats_t stats;              /* Statistics counters */
 	int8_t tx_power;                /* Current TX power (dBm) */
 } esb_instance_t;
@@ -75,6 +78,13 @@ static int esb_device_init(void)
 	DRIVER_INSTANCE_INIT(&esb_inst.base);
 	memset(&esb_inst.stats, 0, sizeof(esb_stats_t));
 	esb_inst.tx_power = 8; /* 8 dBm */
+
+	/* Initialize ACK payload */
+	memset(&esb_inst.response_data, 0, sizeof(response_data_t));
+	esb_inst.ack_payload_enabled = false;
+	esb_inst.ack_payload.length = sizeof(response_data_t);
+	esb_inst.ack_payload.pipe = 0;  /* Pipe 0 for ACK */
+	memset(esb_inst.ack_payload.data, 0, sizeof(response_data_t));
 
 	/* Initialize TX payload with default values */
 	esb_inst.tx_payload = (struct esb_payload)ESB_CREATE_PAYLOAD(0,
@@ -237,6 +247,32 @@ ssize_t esb_read(driver_fd_t fd, void *buf, size_t count)
 }
 
 /*
+ * Update ACK payload with current response data
+ * Called before each transmission to ensure latest data
+ *
+ * NOTE: ACK payloads are not supported in PTX mode in Nordic ESB.
+ * This is a placeholder for future implementation if mode changes to PRX.
+ */
+static void esb_update_ack_payload(void)
+{
+	if (esb_inst.ack_payload_enabled) {
+		/* Copy response data to ACK payload buffer */
+		memcpy(esb_inst.ack_payload.data, &esb_inst.response_data,
+		       sizeof(response_data_t));
+
+		/* NOTE: esb_set_tx_ack_payload() is not available in PTX mode
+		 * ACK payloads are a PRX (receiver) feature. In PTX mode,
+		 * we can only receive ACK payloads, not send them.
+		 * If bidirectional communication is needed, the receiver (PRX)
+		 * should send regular packets back.
+		 */
+
+		LOG_DBG("Response data updated (PTX mode - ACK payload not sent): vib_enable=%d",
+		        esb_inst.response_data.vibration_enable);
+	}
+}
+
+/*
  * Write data to ESB for transmission
  */
 ssize_t esb_write(driver_fd_t fd, const void *buf, size_t count)
@@ -268,6 +304,9 @@ ssize_t esb_write(driver_fd_t fd, const void *buf, size_t count)
 		const sensor_data_t *data = (const sensor_data_t *)buf;
 		LOG_DBG("Sending sensor data: btn=0x%02X", data->btn_state);
 	}
+
+	/* Update ACK payload before transmitting */
+	esb_update_ack_payload();
 
 	/* Transmit packet */
 	err = esb_write_payload(&esb_inst.tx_payload);
@@ -353,6 +392,28 @@ int esb_ioctl(driver_fd_t fd, unsigned int cmd, void *arg)
 		/* Reset all statistics counters */
 		memset(&esb_inst.stats, 0, sizeof(esb_stats_t));
 		LOG_INF("ESB statistics reset");
+		break;
+
+	case ESB_IOCTL_SET_ACK_PAYLOAD:
+		/* Set ACK payload data */
+		if (arg) {
+			memcpy(&esb_inst.response_data, arg, sizeof(response_data_t));
+			LOG_DBG("ACK payload updated: vib_enable=%d",
+			        esb_inst.response_data.vibration_enable);
+		} else {
+			err = DRIVER_ERR_INVAL;
+		}
+		break;
+
+	case ESB_IOCTL_ENABLE_ACK_PL:
+		/* Enable/disable ACK payload */
+		if (arg) {
+			esb_inst.ack_payload_enabled = *(bool *)arg;
+			LOG_INF("ACK payload %s",
+			        esb_inst.ack_payload_enabled ? "enabled" : "disabled");
+		} else {
+			err = DRIVER_ERR_INVAL;
+		}
 		break;
 
 	case ESB_IOCTL_SET_TX_POWER:
