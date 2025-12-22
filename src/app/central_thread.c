@@ -5,13 +5,13 @@
  */
 
 #include "central_thread.h"
-#include "comm/esb_handler.h"
-#include "input/btn_handler.h"
-#include "input/mgc_handler.h"
-#include "sensors/imu_handler.h"
-#include "sensors/imu_fusion.h"
-#include "sensors/imu_math.h"
-#include "drivers/driver_framework.h"
+#include "../drivers/radio/esb_handler.h"
+#include "../drivers/button/btn_handler.h"
+#include "../drivers/gesture/mgc_handler.h"
+#include "../drivers/imu/imu_handler.h"
+#include "../middleware/sensor_fusion/imu_fusion.h"
+#include "../middleware/sensor_fusion/imu_math.h"
+#include "../drivers/driver_framework.h"
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 

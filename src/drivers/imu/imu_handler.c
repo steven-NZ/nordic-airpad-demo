@@ -3,7 +3,7 @@
  */
 
 #include "imu_handler.h"
-#include "../drivers/driver_framework.h"
+#include "../driver_framework.h"
 #include <zephyr/device.h>
 #include <zephyr/drivers/sensor.h>
 #include <zephyr/logging/log.h>

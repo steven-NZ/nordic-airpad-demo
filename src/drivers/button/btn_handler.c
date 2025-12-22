@@ -3,7 +3,7 @@
  */
 
 #include "btn_handler.h"
-#include "../drivers/driver_framework.h"
+#include "../driver_framework.h"
 #include <zephyr/logging/log.h>
 #include <zephyr/init.h>
 #include <dk_buttons_and_leds.h>

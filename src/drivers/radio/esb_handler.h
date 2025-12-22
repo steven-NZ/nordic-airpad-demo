@@ -8,7 +8,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
-#include "../drivers/driver_framework.h"
+#include "../driver_framework.h"
 
 /* Unified sensor data packet structure */
 typedef struct {

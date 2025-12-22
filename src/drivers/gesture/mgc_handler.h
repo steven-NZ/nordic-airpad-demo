@@ -7,7 +7,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
-#include "../drivers/driver_framework.h"
+#include "../driver_framework.h"
 
 /* MGC3130 Message IDs */
 #define MGC3130_MSG_FW_VERSION_INFO       0x83

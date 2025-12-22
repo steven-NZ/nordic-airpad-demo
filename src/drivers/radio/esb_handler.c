@@ -3,7 +3,7 @@
  */
 
 #include "esb_handler.h"
-#include "../drivers/driver_framework.h"
+#include "../driver_framework.h"
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/init.h>
