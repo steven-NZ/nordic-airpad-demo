@@ -267,8 +267,8 @@ static void esb_update_ack_payload(void)
 		 * should send regular packets back.
 		 */
 
-		LOG_DBG("Response data updated (PTX mode - ACK payload not sent): vib_enable=%d",
-		        esb_inst.response_data.vibration_enable);
+		LOG_DBG("Response data updated (PTX mode - ACK payload not sent): vib_intensity=%d",
+		        esb_inst.response_data.vibration_intensity);
 	}
 }
 
@@ -398,8 +398,8 @@ int esb_ioctl(driver_fd_t fd, unsigned int cmd, void *arg)
 		/* Set ACK payload data */
 		if (arg) {
 			memcpy(&esb_inst.response_data, arg, sizeof(response_data_t));
-			LOG_DBG("ACK payload updated: vib_enable=%d",
-			        esb_inst.response_data.vibration_enable);
+			LOG_DBG("ACK payload updated: vib_intensity=%d",
+			        esb_inst.response_data.vibration_intensity);
 		} else {
 			err = DRIVER_ERR_INVAL;
 		}

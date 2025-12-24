@@ -22,7 +22,7 @@ typedef struct {
 
 /* Response data structure (sent back in ACK payload) */
 typedef struct {
-	uint8_t vibration_enable;      /* 0=off, 1=on */
+	uint8_t vibration_intensity;   /* 0-255 (0=off, 1-255=motor intensity) */
 	uint8_t reserved[7];           /* Reserved for future expansion */
 } __attribute__((packed)) response_data_t;
 

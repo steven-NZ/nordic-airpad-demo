@@ -239,18 +239,18 @@ static void central_thread_entry(void *p1, void *p2, void *p3)
 
 				/* Update vibration state based on command */
 				vib_control_t vib_ctrl;
-				vib_ctrl.enable = cmd->vibration_enable;
-				vib_ctrl.intensity = 255;  /* Full intensity when enabled */
+				vib_ctrl.intensity = cmd->vibration_intensity;  /* 0-255 intensity value */
+				vib_ctrl.enable = (cmd->vibration_intensity > 0) ? 1 : 0;  /* On if intensity > 0 */
 
 				ssize_t vib_result = vib_write(vib_fd, &vib_ctrl, sizeof(vib_ctrl));
 				if (vib_result < 0) {
 					LOG_ERR("Failed to update vibration: %d", (int)vib_result);
 				} else {
-					LOG_INF("Vibration %s", vib_ctrl.enable ? "ON" : "OFF");
+					LOG_INF("Vibration intensity=%u", vib_ctrl.intensity);
 				}
 
 				/* Update response data to echo back current state */
-				response_data.vibration_enable = vib_ctrl.enable;
+				response_data.vibration_intensity = vib_ctrl.intensity;
 
 				/* Update ESB ACK payload with current state */
 				result = esb_ioctl(esb_fd, ESB_IOCTL_SET_ACK_PAYLOAD, &response_data);
